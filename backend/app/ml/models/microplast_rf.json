@@ -1,0 +1,107 @@
+{
+  "source": "starter model trained on synthetic data",
+  "trained_at": "2026-09-24T15:02:00.243999+00:00",
+  "classes": [
+    "fiber",
+    "fragment",
+    "film",
+    "pellet",
+    "non_plastic"
+  ],
+  "feature_names": [
+    "area_px",
+    "perimeter_px",
+    "length_px",
+    "width_px",
+    "aspect_ratio",
+    "circularity",
+    "solidity",
+    "extent",
+    "mean_r",
+    "mean_g",
+    "mean_b",
+    "mean_h",
+    "mean_s",
+    "mean_v",
+    "texture_std"
+  ],
+  "sample_count": 1600,
+  "metrics": {
+    "accuracy": 0.9812,
+    "precision": {
+      "fiber": 1.0,
+      "fragment": 1.0,
+      "film": 1.0,
+      "pellet": 1.0,
+      "non_plastic": 0.9143
+    },
+    "recall": {
+      "fiber": 1.0,
+      "fragment": 0.9062,
+      "film": 1.0,
+      "pellet": 1.0,
+      "non_plastic": 1.0
+    },
+    "f1": {
+      "fiber": 1.0,
+      "fragment": 0.9508,
+      "film": 1.0,
+      "pellet": 1.0,
+      "non_plastic": 0.9552
+    },
+    "confusion_matrix": [
+      [
+        64,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        58,
+        0,
+        0,
+        6
+      ],
+      [
+        0,
+        0,
+        64,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        64,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        64
+      ]
+    ],
+    "feature_importance": {
+      "area_px": 0.03775,
+      "perimeter_px": 0.04451,
+      "length_px": 0.08448,
+      "width_px": 0.08782,
+      "aspect_ratio": 0.15189,
+      "circularity": 0.17154,
+      "solidity": 0.11701,
+      "extent": 0.00785,
+      "mean_r": 0.00625,
+      "mean_g": 0.00636,
+      "mean_b": 0.0071,
+      "mean_h": 0.00748,
+      "mean_s": 0.08834,
+      "mean_v": 0.00606,
+      "texture_std": 0.17556
+    }
+  }
+}
