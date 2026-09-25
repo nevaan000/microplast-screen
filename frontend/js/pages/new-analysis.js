@@ -33,7 +33,7 @@ export async function renderNewAnalysis(root) {
         result = await api.uploadAnalysis(data);
       } else if (mode === 'capture') {
         if (!deviceKey()) throw new Error('Enter the device API key on the Device page before capturing.');
-        const sample = await api.createSample({ name: details.name || `ESP32 capture ${new Date().toLocaleString()}`, ...details });
+        const sample = await api.createSample({ ...details, name: details.name || `ESP32 capture ${new Date().toLocaleString()}` });
         const frames = Number(panel.querySelector('#frame-count').value);
         const led = panel.querySelector('#led-on').checked;
         if (led) await api.deviceLed({ state: 'on', level: Number(panel.querySelector('#led-level').value) }, deviceKey());
