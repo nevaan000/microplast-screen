@@ -1,4 +1,5 @@
 #include "camera.h"
+#include "esp_system.h"
 
 namespace {
 constexpr int PWDN = 32, RESET = -1, XCLK = 0, SIOD = 26, SIOC = 27;
