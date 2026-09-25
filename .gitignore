@@ -18,3 +18,4 @@ backend/app/ml/models/*.joblib
 firmware/esp32-cam/include/secrets.h
 .pio/
 .pytest_cache/
+.pytest-data-*/
