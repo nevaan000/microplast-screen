@@ -191,6 +191,10 @@ To flash an AI Thinker ESP32-CAM with a USB-to-UART adapter:
 
 PlatformIO normally detects the connected serial adapter. If it cannot, identify the adapter with `python -m platformio device list`, then set the correct upload port in PlatformIO for that connected board before retrying. The camera and server must use the same trusted LAN.
 
+After connecting to Wi-Fi, the firmware advertises `microplast-cam.local` (when mDNS is supported by the network) and serves a local control page at `http://microplast-cam.local/`. It exposes `/capture`, `/status`, `/led`, `/config`, and `POST /capture-and-send?sample_id=...&frames=1..10`. The push endpoint tags all frames in a session so the backend median-stacks them before analysis. Exposure lock disables automatic exposure, gain, and white balance after camera settings are applied; keep illumination fixed before enabling it.
+
+For reliable AI-Thinker operation, use a regulated **5 V / 2 A** supply. Do not drive a bright chamber LED directly from the ESP32-CAM: use a transistor/MOSFET driver, common ground, and a suitable current-limited LED supply. The onboard flash LED is GPIO 4. An optional external driver can use GPIO 13; avoid pulling GPIO 12 high at boot because it is a strapping pin. Mount the camera square to the filter at a fixed distance, diffuse the LEDs, and use a dark matte enclosure to reduce glare.
+
 ## Processing assumptions and limitations
 
 - Images should show a flat filter under consistent, diffuse illumination and stable focus.
