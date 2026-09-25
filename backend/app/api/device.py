@@ -38,6 +38,12 @@ def _url(host: str, endpoint: str) -> str:
     return f"http://{host}{endpoint}"
 
 
+def _camera_defaults() -> dict[str, Any]:
+    settings = get_settings()
+    params = {"framesize": settings.get("camera_framesize"), "quality": settings.get("camera_quality")}
+    return {key: value for key, value in params.items() if value not in (None, "")}
+
+
 @router.post("/upload", status_code=201)
 async def upload_from_device(
     request: Request,
@@ -90,6 +96,9 @@ def pull_capture(payload: DeviceCaptureRequest, x_api_key: str | None = Header(d
     frames = []
     try:
         with httpx.Client(timeout=8.0) as client:
+            defaults = _camera_defaults()
+            if defaults:
+                client.get(_url(host, "/config"), params=defaults).raise_for_status()
             for _ in range(payload.frames):
                 response = client.get(_url(host, "/capture"))
                 response.raise_for_status()
