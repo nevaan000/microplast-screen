@@ -6,7 +6,7 @@
 
 #include "camera.h"
 #include "led.h"
-#include "wifi.h"
+#include "network.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -49,7 +49,7 @@ void handleStatus() {
                 ",\"free_heap\":" + String(ESP.getFreeHeap()) +
                 ",\"psram\":" + (psramFound() ? "true" : "false") +
                 ",\"led_level\":" + String(ledLevel()) +
-                ",\"ip\":\"" + wifiIp() + "\"," + cameraStatusJson() + "}";
+                ",\"ip\":\"" + networkIp() + "\"," + cameraStatusJson() + "}";
   sendJson(200, body);
 }
 
@@ -116,7 +116,7 @@ void handleCaptureAndSend() {
     const bool ok = sendFrame(frame, session, sampleId, index == frames - 1, lastResponse);
     cameraRelease(frame);
     if (!ok) {
-      sendJson(502, String("{\"detail\":\"Upload failed on frame \") + String(index + 1) + "\"}");
+      sendJson(502, String("{\"detail\":\"Upload failed on frame ") + String(index + 1) + "\"}");
       return;
     }
   }
@@ -155,11 +155,11 @@ void setup() {
     Serial.println("Camera initialization failed.");
     return;
   }
-  wifiBegin();
+  networkBegin();
   configureRoutes();
 }
 
 void loop() {
   server.handleClient();
-  wifiMaintain();
+  networkMaintain();
 }
