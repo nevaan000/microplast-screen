@@ -44,7 +44,10 @@ export async function renderDevice(root) {
   function showStatus(result) {
     status.textContent = result.online ? `Online at ${result.host || currentHost()}` : `Offline: ${result.detail || 'No response'}`;
     status.className = result.online ? 'status-online' : 'status-offline';
-    root.querySelector('#device-info').innerHTML = result.online ? `<dt>Network</dt><dd>${escapeHtml(result.host || currentHost())}</dd><dt>RSSI</dt><dd>${number(result.rssi, 0)} dBm</dd><dt>Free heap</dt><dd>${number(result.heap, 0)} bytes</dd><dt>Resolution</dt><dd>${escapeHtml(result.resolution || '—')}</dd><dt>Uptime</dt><dd>${number(result.uptime_ms ? result.uptime_ms / 1000 : null, 0)} seconds</dd>` : '<dt>Status</dt><dd>Camera is offline or unavailable.</dd>';
+    root.querySelector('#device-info').innerHTML = result.online ? `<dt>Network</dt><dd>${escapeHtml(result.ip || result.host || currentHost())}</dd><dt>RSSI</dt><dd>${number(result.rssi, 0)} dBm</dd><dt>Free heap</dt><dd>${number(result.free_heap, 0)} bytes</dd><dt>PSRAM</dt><dd>${result.psram ? 'Detected' : 'Not detected'}</dd><dt>Frame size</dt><dd>${escapeHtml(result.framesize || '—')} ${escapeHtml(result.resolution || '')}</dd><dt>JPEG quality</dt><dd>${number(result.quality, 0)}</dd><dt>Exposure</dt><dd>${result.exposure_locked ? 'Locked' : 'Automatic'}</dd><dt>External LED driver</dt><dd>${result.external_led ? 'Attached' : 'Not attached'}</dd><dt>Uptime</dt><dd>${number(result.uptime_s, 0)} seconds</dd>` : '<dt>Status</dt><dd>Camera is offline or unavailable.</dd>';
+    if (result.online) {
+      root.querySelector('#lock-exposure').checked = Boolean(result.exposure_locked);
+    }
   }
 
   root.querySelector('#open-capture').onclick = () => navigate('/new');

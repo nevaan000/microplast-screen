@@ -1,129 +1,176 @@
 #include <Arduino.h>
-#include <WiFi.h>
 #include <WebServer.h>
-#include <HTTPClient.h>
-#include "esp_camera.h"
+#include <WiFi.h>
 #include "esp_system.h"
+
+#include "camera.h"
+#include "led.h"
+#include "uploader.h"
+#include "network.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
 #define WIFI_SSID ""
-#define WIFI_PASSWORD ""
+#define WIFI_PASS ""
 #define DEVICE_NAME "microplast-cam"
 #define SERVER_URL ""
 #define DEVICE_API_KEY ""
 #endif
 
+// Chamber illumination and the physical capture trigger. Both pins are only
+// free when no microSD card is fitted, because the card slot uses GPIO 12-15.
+//
+// GPIO 13 is safe for the external LED driver: it is not a strapping pin.
+// GPIO 12 (MTDI) IS a strapping pin - driving it high at reset selects 1.8 V
+// flash and the board will not boot. It is therefore used for the button with
+// an internal pull-DOWN, so the pin idles low and a press connects it to 3V3.
+// Wire the button between GPIO 12 and 3V3, never to a pull-up.
+#ifndef EXTERNAL_LED_PIN
+#define EXTERNAL_LED_PIN 13
+#endif
+#ifndef CAPTURE_BUTTON_PIN
+#define CAPTURE_BUTTON_PIN 12
+#endif
+#ifndef CAPTURE_BUTTON_FRAMES
+#define CAPTURE_BUTTON_FRAMES 3
+#endif
+
 namespace {
-constexpr int PIN_PWDN = 32;
-constexpr int PIN_RESET = -1;
-constexpr int PIN_XCLK = 0;
-constexpr int PIN_SIOD = 26;
-constexpr int PIN_SIOC = 27;
-constexpr int PIN_Y9 = 35;
-constexpr int PIN_Y8 = 34;
-constexpr int PIN_Y7 = 39;
-constexpr int PIN_Y6 = 36;
-constexpr int PIN_Y5 = 21;
-constexpr int PIN_Y4 = 19;
-constexpr int PIN_Y3 = 18;
-constexpr int PIN_Y2 = 5;
-constexpr int PIN_VSYNC = 25;
-constexpr int PIN_HREF = 23;
-constexpr int PIN_PCLK = 22;
-constexpr int PIN_LED = 4;
+
+constexpr int PIN_ONBOARD_LED = 4;
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 250;
 
 WebServer server(80);
-uint8_t ledLevel = 0;
 uint32_t startedAt = 0;
+bool buttonEnabled = false;
+bool buttonState = false;
+bool sessionFired = false;
+unsigned long buttonChangedAt = 0;
+// The physical button replays the most recent push session's sample.
+int lastSampleId = 0;
+
+const char INDEX_PAGE[] PROGMEM = R"HTML(<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MicroPlast CAM</title>
+<style>
+body{font:14px system-ui,sans-serif;margin:1rem;background:#0b1220;color:#e2e8f0}
+h1{font-size:1.2rem}img{max-width:100%;border-radius:8px;background:#000}
+.row{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;margin:.8rem 0}
+button{padding:.5rem .9rem;border:0;border-radius:6px;background:#0ea5e9;color:#fff;font:inherit;cursor:pointer}
+button.off{background:#475569}input[type=range]{width:180px}
+code,p{color:#94a3b8}
+</style></head><body>
+<h1>MicroPlast CAM</h1>
+<p id="info">Reading status&hellip;</p>
+<img id="view" alt="Live capture">
+<div class="row">
+<label>LED <input id="level" type="range" min="0" max="255" value="0"></label>
+<span id="out">0</span>
+<button id="apply">Apply</button>
+<button id="dark" class="off">Off</button>
+<button id="frame">Refresh frame</button>
+</div>
+<p>This page is for bench testing only. Use the MicroPlast Screen dashboard for
+calibration, capture sessions, and analysis.</p>
+<script>
+const $ = id => document.getElementById(id);
+async function status() {
+  try {
+    const info = await (await fetch('/status')).json();
+    $('info').textContent = info.ip + ' - ' + info.framesize + ' ' + info.resolution +
+      ', quality ' + info.quality + ', LED ' + info.led_level +
+      ', exposure ' + (info.exposure_locked ? 'locked' : 'auto') +
+      ', RSSI ' + info.rssi + ' dBm, free heap ' + info.free_heap +
+      ', PSRAM ' + (info.psram ? 'yes' : 'no') + ', uptime ' + info.uptime_s + ' s';
+  } catch (error) { $('info').textContent = 'Status unavailable: ' + error; }
+}
+function frame() { $('view').src = '/capture?t=' + Date.now(); status(); }
+async function led(level) {
+  try { await fetch('/led?level=' + level); } catch (error) { /* status refresh reports the failure */ }
+  status();
+}
+$('level').oninput = e => { $('out').textContent = e.target.value; };
+$('apply').onclick = () => led($('level').value);
+$('dark').onclick = () => { $('level').value = 0; $('out').textContent = '0'; led(0); };
+$('frame').onclick = frame;
+frame();
+setInterval(status, 5000);
+</script></body></html>
+)HTML";
 
 void sendJson(int status, const String& body) {
   server.sendHeader("Cache-Control", "no-store");
   server.send(status, "application/json", body);
 }
 
-bool initCamera() {
-  camera_config_t config{};
-  config.ledc_channel = LEDC_CHANNEL_0;
-  config.ledc_timer = LEDC_TIMER_0;
-  config.pin_d0 = PIN_Y2;
-  config.pin_d1 = PIN_Y3;
-  config.pin_d2 = PIN_Y4;
-  config.pin_d3 = PIN_Y5;
-  config.pin_d4 = PIN_Y6;
-  config.pin_d5 = PIN_Y7;
-  config.pin_d6 = PIN_Y8;
-  config.pin_d7 = PIN_Y9;
-  config.pin_xclk = PIN_XCLK;
-  config.pin_pclk = PIN_PCLK;
-  config.pin_vsync = PIN_VSYNC;
-  config.pin_href = PIN_HREF;
-  config.pin_sccb_sda = PIN_SIOD;
-  config.pin_sccb_scl = PIN_SIOC;
-  config.pin_pwdn = PIN_PWDN;
-  config.pin_reset = PIN_RESET;
-  config.xclk_freq_hz = 20000000;
-  config.pixel_format = PIXFORMAT_JPEG;
-
-  if (psramFound()) {
-    config.frame_size = FRAMESIZE_UXGA;
-    config.jpeg_quality = 11;
-    config.fb_count = 2;
-    config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.grab_mode = CAMERA_GRAB_LATEST;
-  } else {
-    config.frame_size = FRAMESIZE_VGA;
-    config.jpeg_quality = 14;
-    config.fb_count = 1;
-    config.fb_location = CAMERA_FB_IN_DRAM;
-    config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  }
-
-  if (esp_camera_init(&config) != ESP_OK) {
-    return false;
-  }
-
-  sensor_t* sensor = esp_camera_sensor_get();
-  sensor->set_vflip(sensor, 1);
-  sensor->set_hmirror(sensor, 1);
-  return true;
+void sendError(int status, const String& detail) {
+  sendJson(status, "{\"detail\":\"" + detail + "\"}");
 }
 
-void applyLed(uint8_t level) {
-  ledLevel = level;
-  ledcWrite(LEDC_CHANNEL_1, ledLevel);
+// Backend error bodies are JSON text, so quote and control characters must be
+// escaped before they are embedded in another JSON string.
+String escapeJson(const String& value) {
+  String out;
+  out.reserve(value.length() + 8);
+  for (const char character : value) {
+    switch (character) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(character) < 0x20) {
+          char buffer[7];
+          snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned char>(character));
+          out += buffer;
+        } else {
+          out += character;
+        }
+    }
+  }
+  return out;
 }
+
+void handleIndex() { server.send_P(200, "text/html", INDEX_PAGE); }
 
 void handleCapture() {
-  camera_fb_t* frame = esp_camera_fb_get();
-  if (!frame) {
-    sendJson(503, "{\"detail\":\"Camera capture failed\"}");
+  if (!camera::ready()) {
+    sendError(503, "Camera unavailable");
     return;
   }
-
+  camera_fb_t* frame = camera::capture();
+  if (!frame) {
+    sendError(503, "Camera capture failed");
+    return;
+  }
   WiFiClient client = server.client();
+  server.sendHeader("Cache-Control", "no-store");
   server.sendHeader("Content-Disposition", "inline; filename=capture.jpg");
   server.setContentLength(frame->len);
   server.send(200, "image/jpeg", "");
   client.write(frame->buf, frame->len);
-  esp_camera_fb_return(frame);
+  camera::release(frame);
 }
 
 void handleStatus() {
-  sensor_t* sensor = esp_camera_sensor_get();
-  const framesize_t frameSize = sensor ? static_cast<framesize_t>(sensor->status.framesize) : FRAMESIZE_INVALID;
-  String resolution = "unknown";
-  if (frameSize == FRAMESIZE_VGA) resolution = "640x480";
-  if (frameSize == FRAMESIZE_SVGA) resolution = "800x600";
-  if (frameSize == FRAMESIZE_XGA) resolution = "1024x768";
-  if (frameSize == FRAMESIZE_SXGA) resolution = "1280x1024";
-  if (frameSize == FRAMESIZE_UXGA) resolution = "1600x1200";
-
-  String body = "{\"online\":true,\"name\":\"" + String(DEVICE_NAME) + "\",\"rssi\":" +
-                String(WiFi.RSSI()) + ",\"heap\":" + String(ESP.getFreeHeap()) +
-                ",\"uptime_ms\":" + String(millis() - startedAt) + ",\"resolution\":\"" +
-                resolution + "\",\"led_level\":" + String(ledLevel) + "}";
+  String body = "{";
+  body += "\"online\":true,";
+  body += "\"name\":\"" + String(DEVICE_NAME) + "\",";
+  body += "\"ip\":\"" + network::address() + "\",";
+  body += "\"rssi\":" + String(network::rssi()) + ",";
+  body += "\"free_heap\":" + String(ESP.getFreeHeap()) + ",";
+  body += "\"psram\":" + String(camera::hasPsram() ? "true" : "false") + ",";
+  body += "\"framesize\":\"" + String(camera::frameSizeName()) + "\",";
+  body += "\"resolution\":\"" + String(camera::resolution()) + "\",";
+  body += "\"quality\":" + String(camera::quality()) + ",";
+  body += "\"led_level\":" + String(led::level()) + ",";
+  body += "\"external_led\":" + String(led::externalAttached() ? "true" : "false") + ",";
+  body += "\"exposure_locked\":" + String(camera::exposureLocked() ? "true" : "false") + ",";
+  body += "\"uptime_s\":" + String((millis() - startedAt) / 1000);
+  body += "}";
   sendJson(200, body);
 }
 
@@ -134,126 +181,142 @@ void handleLed() {
   } else if (server.hasArg("state")) {
     level = server.arg("state") == "on" ? 255 : 0;
   }
-
   if (level < 0) {
-    sendJson(400, "{\"detail\":\"Provide state=on|off or level=0..255\"}");
+    sendError(400, "Provide state=on|off or level=0..255");
     return;
   }
-  applyLed(static_cast<uint8_t>(level));
-  sendJson(200, "{\"led_level\":" + String(ledLevel) + "}");
+  led::setLevel(static_cast<uint8_t>(level));
+  sendJson(200, "{\"led_level\":" + String(led::level()) + "}");
 }
 
-void handleCameraSettings() {
-  sensor_t* sensor = esp_camera_sensor_get();
-  if (!sensor) {
-    sendJson(503, "{\"detail\":\"Camera unavailable\"}");
+void handleConfig() {
+  if (!camera::ready()) {
+    sendError(503, "Camera unavailable");
     return;
   }
-
+  bool changed = false;
   if (server.hasArg("quality")) {
-    sensor->set_quality(sensor, constrain(server.arg("quality").toInt(), 4, 63));
+    changed = camera::setQuality(server.arg("quality").toInt()) || changed;
   }
   if (server.hasArg("framesize")) {
-    String value = server.arg("framesize");
-    value.toLowerCase();
-    if (value == "vga") sensor->set_framesize(sensor, FRAMESIZE_VGA);
-    if (value == "svga") sensor->set_framesize(sensor, FRAMESIZE_SVGA);
-    if (value == "xga") sensor->set_framesize(sensor, FRAMESIZE_XGA);
-    if (value == "sxga") sensor->set_framesize(sensor, FRAMESIZE_SXGA);
-    if (value == "uxga") sensor->set_framesize(sensor, FRAMESIZE_UXGA);
+    if (!camera::setFrameSize(server.arg("framesize"))) {
+      sendError(422, "Unsupported framesize, or UXGA requested without PSRAM");
+      return;
+    }
+    changed = true;
   }
   if (server.hasArg("lock_exposure")) {
-    const String value = server.arg("lock_exposure");
-    sensor->set_exposure_ctrl(sensor, (value == "true" || value == "1") ? 0 : 1);
+    // httpx serialises Python booleans as "True"/"False", so compare lowercased.
+    String value = server.arg("lock_exposure");
+    value.toLowerCase();
+    changed = camera::setExposureLock(value == "true" || value == "1" || value == "on") || changed;
   }
-  sendJson(200, "{\"ok\":true}");
+  if (!changed) {
+    sendError(422, "Provide framesize, quality, or lock_exposure");
+    return;
+  }
+  sendJson(200, "{\"ok\":true,\"framesize\":\"" + String(camera::frameSizeName()) +
+                    "\",\"quality\":" + String(camera::quality()) +
+                    ",\"exposure_locked\":" + String(camera::exposureLocked() ? "true" : "false") + "}");
 }
 
-void handleSend() {
-  if (String(SERVER_URL).length() == 0 || String(DEVICE_API_KEY).length() == 0) {
-    sendJson(400, "{\"detail\":\"Configure SERVER_URL and DEVICE_API_KEY in secrets.h\"}");
+void handleCaptureAndSend() {
+  if (!uploader::configured()) {
+    sendError(400, "Configure SERVER_URL and DEVICE_API_KEY in secrets.h");
     return;
   }
-
-  camera_fb_t* frame = esp_camera_fb_get();
-  if (!frame) {
-    sendJson(503, "{\"detail\":\"Camera capture failed\"}");
+  const int sampleId = server.hasArg("sample_id") ? server.arg("sample_id").toInt() : 0;
+  const int frames = server.hasArg("frames") ? constrain(server.arg("frames").toInt(), 1, 10) : 1;
+  if (sampleId <= 0) {
+    sendError(422, "Provide sample_id of an existing MicroPlast Screen sample");
     return;
   }
+  lastSampleId = sampleId;
 
-  HTTPClient http;
-  const String target = String(SERVER_URL) + "/api/device/upload";
-  http.begin(target);
-  http.addHeader("Content-Type", "image/jpeg");
-  http.addHeader("X-API-Key", DEVICE_API_KEY);
-  if (server.hasArg("sample_id")) {
-    http.addHeader("X-Sample-Id", server.arg("sample_id"));
-  }
-  const int status = http.POST(frame->buf, frame->len);
-  const String response = http.getString();
-  http.end();
-  esp_camera_fb_return(frame);
-
-  if (status < 200 || status >= 300) {
-    sendJson(502, "{\"detail\":\"Upload failed\",\"status\":" + String(status) + ",\"response\":" + response + "}");
+  const uploader::Result result = uploader::sendSession(sampleId, frames);
+  if (!result.ok) {
+    String body = "{\"detail\":\"" + escapeJson(result.detail) + "\",\"status\":" + String(result.status) +
+                  ",\"uploaded\":" + String(result.uploaded) + ",\"requested\":" + String(result.requested) + "}";
+    sendJson(502, body);
     return;
   }
-  sendJson(200, response);
-}
-
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi");
-  const unsigned long deadline = millis() + 30000;
-  while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
-    delay(400);
-    Serial.print('.');
-  }
-  Serial.println();
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.print("Camera ready at http://");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("Wi-Fi connection failed; check secrets.h and reboot.");
-  }
+  server.sendHeader("Cache-Control", "no-store");
+  server.send(200, "application/json", result.detail);
 }
 
 void configureRoutes() {
+  server.on("/", HTTP_GET, handleIndex);
   server.on("/capture", HTTP_GET, handleCapture);
-  server.on("/stream-frame", HTTP_GET, handleCapture);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/led", HTTP_GET, handleLed);
   server.on("/led", HTTP_POST, handleLed);
-  server.on("/config", HTTP_GET, handleCameraSettings);
-  server.on("/send", HTTP_POST, handleSend);
-  server.onNotFound([]() { sendJson(404, "{\"detail\":\"Not found\"}"); });
+  server.on("/config", HTTP_GET, handleConfig);
+  server.on("/config", HTTP_POST, handleConfig);
+  server.on("/capture-and-send", HTTP_POST, handleCaptureAndSend);
+  server.onNotFound([]() { sendError(404, "Not found"); });
   server.begin();
 }
+
+void pollButton() {
+  if (!buttonEnabled) {
+    return;
+  }
+  const bool reading = digitalRead(CAPTURE_BUTTON_PIN) == HIGH;
+  const unsigned long now = millis();
+  if (reading != buttonState) {
+    buttonState = reading;
+    buttonChangedAt = now;
+    if (!buttonState) {
+      sessionFired = false;
+    }
+    return;
+  }
+  if (!buttonState || sessionFired || now - buttonChangedAt < BUTTON_DEBOUNCE_MS) {
+    return;
+  }
+  sessionFired = true;
+
+  if (lastSampleId <= 0) {
+    Serial.println("[button] no sample_id yet; POST /capture-and-send?sample_id=N&frames=M first.");
+    return;
+  }
+  Serial.printf("[button] capturing %d frame(s) for sample %d\n", CAPTURE_BUTTON_FRAMES, lastSampleId);
+  const uploader::Result result = uploader::sendSession(lastSampleId, CAPTURE_BUTTON_FRAMES);
+  Serial.printf("[button] %s: %d/%d uploaded %s\n", result.ok ? "ok" : "failed", result.uploaded, result.requested,
+                result.detail.c_str());
+}
+
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(false);
   startedAt = millis();
-  pinMode(PIN_LED, OUTPUT);
-  ledcSetup(LEDC_CHANNEL_1, 5000, 8);
-  ledcAttachPin(PIN_LED, LEDC_CHANNEL_1);
-  applyLed(0);
+  Serial.println();
+  Serial.println("MicroPlast Screen ESP32-CAM firmware");
 
-  if (!initCamera()) {
-    Serial.println("Camera initialization failed.");
-    return;
+  led::begin(PIN_ONBOARD_LED, EXTERNAL_LED_PIN);
+
+  if (!camera::begin()) {
+    Serial.println("Camera initialization failed. Check the ribbon connector and the 5 V supply.");
+    // Keep Wi-Fi and the status endpoint alive so the failure is visible remotely.
   }
-  connectWiFi();
+
+  network::begin(WIFI_SSID, WIFI_PASS, DEVICE_NAME);
+  uploader::configure(SERVER_URL, DEVICE_API_KEY);
+  Serial.printf("Push mode: %s\n", uploader::configured() ? "configured" : "SERVER_URL or DEVICE_API_KEY missing");
+
+  pinMode(CAPTURE_BUTTON_PIN, INPUT_PULLDOWN);
+  buttonEnabled = uploader::configured();
+  buttonState = digitalRead(CAPTURE_BUTTON_PIN) == HIGH;
+  buttonChangedAt = millis();
+
   configureRoutes();
+  Serial.printf("HTTP server listening on port 80. Try http://%s.local/\n", network::hostname());
 }
 
 void loop() {
   server.handleClient();
-  if (WiFi.status() != WL_CONNECTED) {
-    WiFi.reconnect();
-    delay(100);
-  }
+  network::maintain();
+  pollButton();
 }
