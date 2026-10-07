@@ -15,6 +15,7 @@ data/exports/*
 !data/calibration/.gitkeep
 !data/exports/.gitkeep
 backend/app/ml/models/*.joblib
+backend/app/ml/models/*.json
 firmware/esp32-cam/include/secrets.h
 .pio/
 .pytest_cache/

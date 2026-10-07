@@ -105,7 +105,9 @@ def load_model() -> RandomForestClassifier:
 
 
 def model_status() -> dict[str, Any]:
-    if not META_PATH.exists():
+    # Both artefacts must exist: metadata without a model file would report
+    # metrics for a classifier that cannot actually make predictions.
+    if not (MODEL_PATH.exists() and META_PATH.exists()):
         return ensure_starter_model()
     return json.loads(META_PATH.read_text(encoding="utf-8"))
 

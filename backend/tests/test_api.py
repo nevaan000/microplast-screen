@@ -1,8 +1,9 @@
 import cv2
+import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
-from scripts.generate_synthetic import generate_image
+from scripts.generate_synthetic import SYNTHETIC_MM_PER_PIXEL, generate_image
 
 
 def _jpeg_bytes():
@@ -51,3 +52,19 @@ def test_device_upload_auth_and_invalid_file(clean_data):
         bad = client.post("/api/analyze", files=[("images", ("bad.txt", b"not-an-image", "text/plain"))])
         assert bad.status_code in {400, 415}
         client.delete(f"/api/samples/{sample_id}")
+
+
+def test_demo_does_not_create_a_calibration(clean_data):
+    with TestClient(app) as client:
+        before = client.get("/api/calibration").json()
+        demo = client.post("/api/demo/generate", json={"name": "Demo scale check", "n_particles": 12, "noise": 0})
+        assert demo.status_code == 201
+        body = demo.json()
+        # The demo is scaled with the synthetic constant handed to the pipeline...
+        assert body["analysis"]["mm_per_pixel"] == pytest.approx(SYNTHETIC_MM_PER_PIXEL)
+        # ...but it must never be recorded as, or promoted to, a camera calibration,
+        # otherwise the next real upload inherits a fabricated mm-per-pixel scale.
+        after = client.get("/api/calibration").json()
+        assert len(after["items"]) == len(before["items"])
+        assert after["active"] == before["active"]
+        assert client.delete(f"/api/samples/{body['sample']['id']}").status_code == 204

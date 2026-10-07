@@ -47,7 +47,10 @@ class DemoRequest(BaseModel):
     location: str | None = Field(default="Synthetic demo")
     volume_ml: float | None = Field(default=1000, gt=0)
     filter_pore_um: float | None = Field(default=20, gt=0)
-    notes: str | None = Field(default="Generated synthetic filter image")
+    notes: str | None = Field(
+        default="Generated synthetic filter image. Sizes use a synthetic scale of 0.02 mm per pixel, "
+                "which is not a camera calibration.",
+    )
     n_particles: int = Field(default=80, ge=1, le=500)
     fibre_ratio: float = Field(default=0.35, ge=0, le=1)
     noise: float = Field(default=7, ge=0, le=50)

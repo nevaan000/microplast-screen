@@ -94,12 +94,11 @@ def generate_demo(payload: DemoRequest):
         "n_particles": values["n_particles"], "fibre_ratio": values["fibre_ratio"], "noise": values["noise"],
         "lighting_gradient": values["lighting_gradient"],
     })
-    with database() as conn:
-        has_calibration = conn.execute("SELECT 1 FROM calibrations WHERE is_active = 1").fetchone() is not None
-        conn.execute(
-            "INSERT INTO calibrations(mm_per_pixel, pixel_distance, real_mm, note, created_at, is_active) VALUES (?, ?, ?, ?, datetime('now'), ?)",
-            (SYNTHETIC_MM_PER_PIXEL, 500, 10, "Synthetic demo scale", 0 if has_calibration else 1),
-        )
+    # The synthetic scale is passed straight to the analysis so the demo reports
+    # millimetres. It is deliberately NOT written to the calibrations table: a
+    # fabricated scale would otherwise become the active calibration and silently
+    # size real samples that were never calibrated.
     analysis = persist_analysis(sample["id"], [image], sample.get("volume_ml"), get_settings(), SYNTHETIC_MM_PER_PIXEL)
     analysis["ground_truth_count"] = len(ground_truth)
+    analysis["synthetic_mm_per_pixel"] = SYNTHETIC_MM_PER_PIXEL
     return {"sample": sample, "analysis": analysis}
