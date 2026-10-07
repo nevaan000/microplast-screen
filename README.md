@@ -163,7 +163,9 @@ copy firmware\esp32-cam\include\secrets.h.example firmware\esp32-cam\include\sec
 cp firmware/esp32-cam/include/secrets.h.example firmware/esp32-cam/include/secrets.h
 ```
 
-Set `WIFI_SSID`, `WIFI_PASSWORD`, `DEVICE_NAME`, `SERVER_URL`, and `DEVICE_API_KEY` in `secrets.h`. `SERVER_URL` must be the LAN address of the computer running this backend, including its port, such as `http://192.168.1.50:8000`. The firmware and backend `DEVICE_API_KEY` values must match exactly.
+Set `WIFI_SSID`, `WIFI_PASS`, `DEVICE_NAME`, `SERVER_URL`, and `DEVICE_API_KEY` in `secrets.h`. `SERVER_URL` must be the LAN address of the computer running this backend, including its port, such as `http://192.168.1.50:8000`. The firmware and backend `DEVICE_API_KEY` values must match exactly.
+
+The firmware registers `DEVICE_NAME` over mDNS, so the camera is also reachable at `http://microplast-cam.local/` when the network allows mDNS. Opening that address in a browser shows a bench-test page with a live frame and LED controls.
 
 Build the firmware:
 
@@ -191,15 +193,135 @@ To flash an AI Thinker ESP32-CAM with a USB-to-UART adapter:
 
 PlatformIO normally detects the connected serial adapter. If it cannot, identify the adapter with `python -m platformio device list`, then set the correct upload port in PlatformIO for that connected board before retrying. The camera and server must use the same trusted LAN.
 
-## Processing assumptions and limitations
+### Firmware endpoints
 
-- Images should show a flat filter under consistent, diffuse illumination and stable focus.
-- The system identifies visible particles by geometry, colour, texture, and configured visual rules. It cannot determine polymer chemistry.
-- Dust, organic material, mineral grains, air bubbles, filter texture, and filter damage can cause false positives.
-- Transparent, overlapping, very small, blurred, or poorly illuminated particles may be missed or measured unreliably.
-- Distance, focus, resolution, compression, and lighting changes affect segmentation and measurement. Use calibration and repeatable capture conditions.
-- Classifier results depend on its local training data and verified labels; they are not independent laboratory validation.
-- Use the results for triage and optical estimation, not as a replacement for laboratory quality assurance.
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/` | Bench-test page with a live frame and LED controls. |
+| GET | `/capture` | One JPEG frame. |
+| GET | `/status` | `uptime_s`, `rssi`, `free_heap`, `psram`, `framesize`, `quality`, `led_level`, `ip`, `exposure_locked`. |
+| GET/POST | `/led?state=on\|off&level=0-255` | Chamber illumination level. |
+| GET/POST | `/config?framesize=..&quality=..&lock_exposure=0\|1` | Camera settings; `lock_exposure=1` freezes aec, agc, and awb for consistent lighting. |
+| POST | `/capture-and-send?sample_id=N&frames=1-10` | Push mode: captures a session and POSTs each frame to the backend `/api/device/upload` with `X-API-Key`, `X-Sample-Id`, and `X-Capture-Session`. Only the final frame carries `X-Capture-Complete: true`, which is what triggers analysis. |
+
+After a successful `/capture-and-send`, pressing the wired capture button replays the same sample for `CAPTURE_BUTTON_FRAMES` frames. The first two frames after boot or any settings change are discarded so the sensor settles before an image is used.
+
+### Wiring
+
+USB-to-UART programming, with the GPIO 0 jumper that forces flash mode:
+
+```text
+  USB-to-UART adapter            AI-Thinker ESP32-CAM
+  -------------------            --------------------
+        GND  --------------------  GND
+        TX   --------------------  U0R
+        RX   --------------------  U0T
+        5 V  ----(optional)------  5 V     (see the power advice below)
+                                   GPIO0 --[ jumper ]-- GND   flashing only
+```
+
+Remove the GPIO 0 jumper and reset the board after uploading. Never power the board from the adapter's 3.3 V pin.
+
+External LED driver, low-side switched by a logic-level N-channel MOSFET such as an IRLZ44N or AO3400. `EXTERNAL_LED_PIN` defaults to GPIO 13:
+
+```text
+            +5 V (external supply, common ground with the ESP32)
+              |
+            [ LED string with series current-limiting resistor ]
+              |
+   D ---------+   Drain
+   G ----[220R]---- GPIO13
+   S ---------+   Source
+              |
+             GND ---- ESP32 GND
+              |
+           [10k]  gate-to-ground pulldown, keeps the LED off during boot
+              |
+             GND
+```
+
+Capture button on GPIO 12. GPIO 12 is the MTDI strapping pin: if it is high at reset the board tries to boot with 1.8 V flash and fails. The firmware therefore configures it as `INPUT_PULLDOWN`, so the pin idles low and a press connects it to 3 V 3. Do not use a pull-up on this pin.
+
+```text
+   3V3 ----[ momentary button ]---- GPIO12   (internal pull-down, idles low)
+```
+
+Override the pins with `-DEXTERNAL_LED_PIN=..` and `-DCAPTURE_BUTTON_PIN=..` build flags, or set `EXTERNAL_LED_PIN` to `-1` to drive only the on-board flash LED. Both pins are unavailable when a microSD card is fitted, because the card slot occupies GPIO 12 to 15.
+
+### Power and brownouts
+
+The ESP32-CAM draws short current peaks above 300 mA when the Wi-Fi radio transmits, and more again when the flash LED is on. Powering it from a USB port, a long thin jumper lead, or a shared breadboard rail causes the brownout detector to reset the board mid-capture.
+
+- Use a regulated **5 V, 2 A minimum** supply with short, thick leads soldered or clamped directly to the 5 V and GND pins.
+- Add a **470 µF to 1000 µF electrolytic** plus a **100 nF ceramic** capacitor across the 5 V and GND rails close to the board.
+- Keep the external LED string on its own supply rail; do not run it from the ESP32's 3.3 V pin.
+- Symptom of an inadequate supply: repeated `Brownout detector was triggered` resets, Wi-Fi dropouts exactly when the LED turns on, or corrupt JPEG frames.
+
+### Camera mounting
+
+- Fix the board to a rigid bracket so the lens stays square to the filter and the distance cannot drift. Any movement invalidates the active calibration.
+- With the stock OV2640 lens, a working distance of roughly **8 to 15 cm** fills the frame with a 47 mm filter membrane. Measure and record your distance, then reuse it for both calibration and samples.
+- Set focus once at that distance by turning the lens barrel until the filter texture is sharp, then lock it with the retaining ring or a small dab of hot glue.
+- Mount the LED so light is diffused and even across the filter. A single point source directly above the lens creates a bright centre, specular highlights, and shadowed edges that change segmentation results.
+- Enclose the sample in a dark, matt-black chamber to exclude room light, which otherwise varies between captures.
+
+## Screenshots
+
+Capture these views from a running instance and store them in `docs/screenshots/`:
+
+| File | View | What it shows |
+| --- | --- | --- |
+| `dashboard.png` | `#/` | KPI cards, device and calibration status chips, trend chart, class donut, recent samples. |
+| `new-analysis.png` | `#/new` | The three input modes: upload, ESP32-CAM capture, synthetic demo. |
+| `results.png` | `#/sample/:id` | Summary panel, annotated image viewer, particle table, charts, disclaimer. |
+| `history.png` | `#/history` | Sample grid with search, date filter, compare, and delete. |
+| `calibration.png` | `#/calibration` | Two-point reference selection and millimetres-per-pixel history. |
+| `device.png` | `#/device` | Live preview, LED control, camera settings, firmware connection values. |
+| `ml-lab.png` | `#/ml` | Model status, training options, metrics, confusion matrix, feature importance. |
+| `settings.png` | `#/settings` | Grouped segmentation, classification, size-bin, and device parameters. |
+| `about.png` | `#/about` | Pipeline diagram, capabilities, limitations, recommended imaging setup. |
+
+## Assumptions
+
+These assumptions were made while building the system. Change them in **Settings** or `.env` where they do not match your setup.
+
+- **Filter appearance.** Samples are imaged on a light membrane filter, so `background_mode` defaults to `light_filter` and particles are expected to be darker than the background. Dark-background imaging requires switching to `dark_filter`.
+- **Imaging geometry is fixed.** Camera distance, focus, resolution, and filter position are assumed constant between a calibration and the samples that use it. Any change invalidates the active calibration.
+- **One filter per sample.** All frames in a single analysis are assumed to be the same filter at the same scale, which is what makes per-pixel median stacking valid.
+- **Frame size.** Input images are assumed to be at most 1600×1200, the ESP32-CAM UXGA maximum. Processing happens at full resolution without downscaling.
+- **Accepted formats.** Only JPEG and PNG are accepted, up to `MAX_UPLOAD_MB` (default 10 MB) per file.
+- **Volume is optional.** Concentration in particles per litre is reported only when a sampled volume in millilitres is supplied; otherwise it stays null rather than being estimated.
+- **Default classifier.** `classifier_mode` defaults to `hybrid`. When no trained model file exists, a starter RandomForest is trained on synthetic data and is labelled as such in the UI. Its accuracy reflects synthetic variety, not your samples.
+- **Microplastic size definition.** The 5 mm upper bound of the common microplastic definition is used for the largest size bin, which is flagged rather than counted silently.
+- **Minimum reliable size.** Detection is treated as reliable from `min_reliable_px` (default 5 px) upward, scaled by the active millimetres-per-pixel value. Smaller particles may appear but are not considered dependable.
+- **Device API key storage.** The browser keeps the device key in local storage for the current origin only. The authoritative key lives in the backend `.env` and is never sent to the browser.
+- **Network trust.** The backend and the ESP32-CAM are assumed to share a trusted LAN. Device traffic is plain HTTP by design, since the camera firmware has no TLS certificate store.
+- **No internet at runtime.** Chart.js is vendored at `frontend/vendor/chart.umd.js`, so the dashboard works fully offline.
+- **Cross-platform storage.** All stored image paths are relative to the project root and use forward slashes, so a data directory can move between Windows, macOS, and Linux.
+
+## Known limitations
+
+- **No chemical identification.** A visible-light camera cannot determine polymer type. Nothing in this system identifies polyethylene, PET, or any other polymer; results are optical screening only.
+- **Resolution floor.** The minimum dependable size is set by sensor resolution, lens, and working distance. Sub-micron and low-micron particles are beyond reach.
+- **Transparent particles.** Clear fragments and fibres barely differ from the filter in intensity or colour, so they are frequently missed or under-measured.
+- **False positives.** Dust, organic debris, mineral grains, air bubbles, textile fibres shed by clothing, and filter texture or damage all segment like particles.
+- **Lighting sensitivity.** Uneven or changing illumination shifts thresholds and therefore counts. Illumination correction mitigates but does not remove this.
+- **Calibration dependency.** Without an active calibration, all sizes stay in pixels and concentrations cannot be computed.
+- **Touching particles.** Overlapping or aggregated particles are segmented as single objects, biasing counts down and sizes up. Closing morphology can make this worse for fibres.
+- **Classifier data quality.** Model accuracy depends entirely on the diversity and correctness of verified labels and synthetic training data. It is not independent laboratory validation.
+- **Single camera, single field of view.** Only what fits in one frame is analysed; there is no stage automation or mosaicking to cover a whole filter at high magnification.
+- **Environmental samples are harder than lab samples.** Real water samples contain far more interfering material than the synthetic demos.
+- **Local, single-user scope.** There is no authentication, no multi-user isolation, and no audit trail beyond the database timestamps. The dashboard must not be exposed to the public internet.
+
+## Future scope
+
+- **Fluorescence imaging.** Add a UV or blue excitation source with an emission filter; many polymers autofluoresce, which would separate plastic from most organic debris far better than brightfield rules.
+- **Better optics.** A macro lens or microscope objective with a fixed working distance would lower the resolution floor and reduce edge distortion.
+- **Automated filtration and staging.** A peristaltic pump with a filter holder and a motorised XY stage would give repeatable sample volumes and full-filter coverage through image mosaicking.
+- **GPS and field metadata.** Record sampling coordinates, timestamp, and operator on the device so field surveys carry traceable provenance.
+- **On-device TinyML.** Move a quantised shape classifier onto the ESP32 so the camera can pre-screen frames and upload only candidate particles, cutting bandwidth and storage.
+- **Cloud sync and shared datasets.** Optional encrypted export of verified particle records to a central repository would let multiple sites build a shared training corpus.
+- **Spectroscopy coupling.** A workflow that flags suspect particles for FTIR or Raman confirmation and records the confirmed result back against the particle would close the identification gap.
 
 ## Settings and review
 
