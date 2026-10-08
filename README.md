@@ -56,9 +56,11 @@ python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
 
 The API documentation is available at `http://127.0.0.1:8000/docs` while the server is running.
 
-## Local and LAN security
+## Security model
 
-This dashboard is for **local or trusted-LAN operation only. Do not expose it to the public internet.** The ESP32-CAM control and image traffic use HTTP, and the browser stores the device API key in local storage.
+By default the dashboard assumes **local or trusted-LAN operation with no login**. The ESP32-CAM control and image traffic use HTTP, and the browser stores the device API key in local storage. In that mode, allow access only from the trusted local network in the host firewall, and do not configure router port forwarding, a public DNS record, or a public reverse proxy.
+
+To publish the dashboard, set `ADMIN_PASSWORD` (and optionally `ADMIN_USER`). Every API endpoint except health, sign-in, and device upload then requires a session cookie issued by the sign-in page. Sessions last `SESSION_HOURS` (default 12), are stored in the database, and the cookie is `HttpOnly`, `SameSite=Lax`, and marked `Secure` whenever the request arrives over HTTPS or with `X-Forwarded-Proto: https`. Failed sign-ins are rate-limited per client address. A public deployment must terminate TLS at the host or reverse proxy so credentials and session cookies never travel in clear text.
 
 For trusted-LAN access on macOS or Linux, bind the runner explicitly:
 
@@ -100,8 +102,29 @@ Important `.env` values:
 - `ESP32_IP`: camera hostname or IP address, optionally with a port; do not include `http://`.
 - `MAX_UPLOAD_MB`: maximum accepted upload size.
 - `DATA_DIR`: local storage root, defaulting to `data`.
+- `ADMIN_USER` / `ADMIN_PASSWORD`: dashboard login. Leave the password empty for local use without a login; set it before publishing.
+- `SESSION_HOURS`: how long a sign-in session stays valid, default 12.
 
 The application stores its SQLite database at `data/microplastic.db`. Uploaded originals, annotated images, and masks are stored in `data/raw`, `data/processed`, and `data/masks`. Delete samples through the History page so database records and generated assets are removed together.
+
+## Publishing on a container host
+
+The backend serves the dashboard itself, so a single container provides one public URL for both the UI and the API. A static host such as Vercel is not needed for the frontend and cannot run the backend at all: OpenCV analysis and the SQLite database need a persistent disk and more request time than serverless functions allow.
+
+Build and run the image locally:
+
+```sh
+docker build -t microplast-screen .
+docker run --rm -p 8000:8000 -v microplast-data:/data -e ADMIN_PASSWORD=pick-a-long-password -e DEVICE_API_KEY=pick-a-device-key microplast-screen
+```
+
+The database and generated images live in the `/data` volume; without a volume they disappear when the container is replaced.
+
+On Render, Railway, or Fly.io, deploy this repository as a Docker service, attach a persistent disk mounted at `/data` (Fly.io `fly.toml`: `mounts: source=microplast_data, destination=/data`; Render: add a disk at `/data`; Railway: add a volume with mount path `/data`), set `ADMIN_PASSWORD` and `DEVICE_API_KEY` as environment variables, and let the platform terminate HTTPS. Set `PORT` only if the platform requires a specific value; the image honours it.
+
+Point the ESP32-CAM at the public address by setting `SERVER_URL` in `firmware/esp32-cam/include/secrets.h` to the HTTPS URL, for example `https://microplast-screen.onrender.com`. The firmware uploads over HTTPS and authenticates with `DEVICE_API_KEY`, exactly as on the LAN.
+
+Never publish an instance without `ADMIN_PASSWORD`: anyone who learns the URL could read, upload, and delete samples.
 
 ## Screening workflows
 

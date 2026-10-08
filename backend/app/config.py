@@ -17,8 +17,15 @@ class AppConfig:
     device_api_key: str = os.getenv("DEVICE_API_KEY", "change-this-local-device-key")
     esp32_ip: str = os.getenv("ESP32_IP", "")
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
+    admin_user: str = os.getenv("ADMIN_USER", "admin")
+    admin_password: str = os.getenv("ADMIN_PASSWORD", "")
+    session_hours: int = int(os.getenv("SESSION_HOURS", "12"))
     host: str = os.getenv("HOST", "127.0.0.1")
     port: int = int(os.getenv("PORT", "8000"))
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.admin_password)
 
     @property
     def db_path(self) -> Path:

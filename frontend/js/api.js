@@ -1,5 +1,12 @@
 const base = '/api';
 
+export class AuthRequired extends Error {
+  constructor() {
+    super('Authentication required');
+    this.name = 'AuthRequired';
+  }
+}
+
 function requestError(body) {
   if (typeof body !== 'object' || body === null) return body || 'Request failed';
   if (typeof body.detail === 'string') return body.detail;
@@ -11,6 +18,9 @@ async function request(path, options = {}) {
   const response = await fetch(`${base}${path}`, options);
   const type = response.headers.get('content-type') || '';
   const body = type.includes('application/json') ? await response.json() : await response.text();
+  if (response.status === 401 && typeof body === 'object' && body !== null && body.detail === 'Authentication required') {
+    throw new AuthRequired();
+  }
   if (!response.ok) throw new Error(requestError(body));
   return body;
 }
@@ -22,6 +32,9 @@ const json = (method, path, payload, headers = {}) => request(path, {
 export const api = {
   request,
   health: () => request('/health'),
+  me: () => request('/auth/me'),
+  login: (username, password) => json('POST', '/auth/login', { username, password }),
+  logout: () => json('POST', '/auth/logout'),
   overview: () => request('/stats/overview'),
   samples: (params = {}) => request(`/samples?${new URLSearchParams(params)}`),
   sample: id => request(`/samples/${id}`),

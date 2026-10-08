@@ -151,6 +151,11 @@ def initialize_database() -> None:
                 created_at TEXT NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value_json TEXT NOT NULL
