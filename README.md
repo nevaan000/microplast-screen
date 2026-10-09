@@ -126,6 +126,16 @@ Point the ESP32-CAM at the public address by setting `SERVER_URL` in `firmware/e
 
 Never publish an instance without `ADMIN_PASSWORD`: anyone who learns the URL could read, upload, and delete samples.
 
+### Optional: serve the dashboard from Vercel
+
+Vercel cannot run the Python backend, but it can host the static dashboard and proxy the API to your container host, giving you one public Vercel URL for everything. `vercel.json` already contains the routing: `/api/*`, `/docs`, and `/openapi.json` are rewritten to an external origin, and every other path is served from `frontend/`.
+
+1. Replace the four `https://YOUR-BACKEND-HOST.example.com` destinations in `vercel.json` with your container host's HTTPS URL. The placeholder is deliberately invalid so a forgotten edit fails loudly instead of proxying to the wrong host.
+2. In the Vercel dashboard, import this repository as an **Other** project with no build command and no output directory, then deploy.
+3. Keep `ADMIN_PASSWORD` and `DEVICE_API_KEY` set on the container host; Vercel needs no secrets of its own.
+
+Because the proxy keeps the browser on a single origin, the session cookie and the device upload flow work exactly as they do when the backend serves the dashboard itself. API responses are never cached by Vercel's CDN (`x-vercel-enable-rewrite-caching: 0`), so sample lists and results always come from the backend. The ESP32-CAM can post to either URL; both authenticate with `DEVICE_API_KEY`.
+
 ## Screening workflows
 
 ### Upload filter images

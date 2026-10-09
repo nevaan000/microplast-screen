@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "https://YOUR-BACKEND-HOST.example.com/api/:path*" },
+    { "source": "/docs", "destination": "https://YOUR-BACKEND-HOST.example.com/docs" },
+    { "source": "/docs/:path*", "destination": "https://YOUR-BACKEND-HOST.example.com/docs/:path*" },
+    { "source": "/openapi.json", "destination": "https://YOUR-BACKEND-HOST.example.com/openapi.json" },
+    { "source": "/", "destination": "/frontend/index.html" },
+    { "source": "/:path*", "destination": "/frontend/:path*" }
+  ],
+  "headers": [
+    {
+      "source": "/api/:path*",
+      "headers": [{ "key": "x-vercel-enable-rewrite-caching", "value": "0" }]
+    }
+  ]
+}
