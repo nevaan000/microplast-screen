@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hmac
 import re
+import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 import cv2
 import httpx
+import numpy as np
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
@@ -15,6 +16,7 @@ from starlette.concurrency import run_in_threadpool
 from ..config import config
 from ..db import get_settings
 from ..schemas import DeviceCaptureRequest, DeviceLedRequest
+from ..storage import AssetNotFound, delete_assets, list_assets, put_asset, read_asset
 from .common import analysis_slot, decode_image, persist_analysis, require_sample
 from .analyze import _active_mm_per_pixel
 
@@ -47,23 +49,34 @@ def _camera_defaults() -> dict[str, Any]:
 
 def _store_device_frame(sample_id: int, content: bytes, content_type: str | None, session: str, complete: bool, volume_ml: float | None) -> dict[str, Any]:
     frame = decode_image(content, content_type)
-    frame_path = config.raw_dir / f"session-{sample_id}-{session}-{uuid.uuid4().hex}.jpg"
-    if not cv2.imwrite(str(frame_path), frame):
+    ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok:
         raise HTTPException(status_code=500, detail="Could not store uploaded device frame")
+    prefix = f"raw/session-{sample_id}-{session}-"
+    # Frames land in shared storage, not on a local disk: consecutive uploads from
+    # one camera can be served by different instances. The timestamp keeps the
+    # lexicographic listing in capture order.
+    put_asset(f"{prefix}{time.time_ns():020d}.jpg", encoded.tobytes(), "image/jpeg")
     if not complete:
         return {"stored": True, "capture_session": session, "analysis": None}
     # Storing a single frame is cheap and stays outside the slot, so a camera
     # mid-session is never made to wait out an unrelated analysis. Only the final
     # frame, which loads the whole session into memory, is queued.
+    pathnames = list_assets(prefix)
     with analysis_slot():
-        paths = sorted(config.raw_dir.glob(f"session-{sample_id}-{session}-*.jpg"))
-        frames = [cv2.imread(str(path), cv2.IMREAD_COLOR) for path in paths]
-        frames = [item for item in frames if item is not None]
+        frames = []
+        for pathname in pathnames:
+            try:
+                stored = read_asset(pathname)
+            except AssetNotFound:
+                continue
+            decoded = cv2.imdecode(np.frombuffer(stored, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if decoded is not None:
+                frames.append(decoded)
         if not frames:
             raise HTTPException(status_code=400, detail="No decodable frames were available for the completed capture session")
         analysis = persist_analysis(sample_id, frames, volume_ml, get_settings(), _active_mm_per_pixel())
-    for path in paths:
-        path.unlink(missing_ok=True)
+    delete_assets(pathnames)
     return {"stored": True, "capture_session": session, "analysis": analysis}
 
 

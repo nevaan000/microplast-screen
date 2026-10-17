@@ -26,6 +26,9 @@ export async function renderNewAnalysis(root) {
       if (mode === 'upload') {
         const files = [...panel.querySelector('#image-files').files];
         if (!files.length) throw new Error('Select at least one JPEG or PNG image');
+        const limitMb = (await api.health()).max_upload_mb;
+        const totalMb = files.reduce((total, file) => total + file.size, 0) / 1048576;
+        if (totalMb > limitMb) throw new Error(`The ${files.length} selected images total ${totalMb.toFixed(1)} MB, over the ${limitMb} MB limit. Remove a frame or export the camera at a lower resolution.`);
         const data = new FormData();
         files.forEach(file => data.append('images', file));
         Object.entries(details).forEach(([key, value]) => { if (value !== undefined && value !== '') data.append(key, value); });

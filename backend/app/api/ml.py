@@ -30,9 +30,9 @@ def retrain_model(payload: TrainRequest):
 @router.patch("/particles/{particle_id}")
 def correct_particle(particle_id: int, payload: ParticleUpdate):
     with database() as conn:
-        exists = conn.execute("SELECT id FROM particles WHERE id = ?", (particle_id,)).fetchone()
+        exists = conn.execute("SELECT id FROM particles WHERE id = %s", (particle_id,)).fetchone()
         if exists is None:
             raise HTTPException(status_code=404, detail="Particle not found")
-        conn.execute("UPDATE particles SET user_verified_class = ? WHERE id = ?", (payload.user_verified_class, particle_id))
-        item = conn.execute("SELECT * FROM particles WHERE id = ?", (particle_id,)).fetchone()
+        conn.execute("UPDATE particles SET user_verified_class = %s WHERE id = %s", (payload.user_verified_class, particle_id))
+        item = conn.execute("SELECT * FROM particles WHERE id = %s", (particle_id,)).fetchone()
     return dict(item)

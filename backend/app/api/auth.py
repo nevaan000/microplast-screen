@@ -46,11 +46,11 @@ def session_user(request: Request) -> str | None:
     if not token:
         return None
     with database() as conn:
-        row = conn.execute("SELECT expires_at FROM sessions WHERE token = ?", (token,)).fetchone()
+        row = conn.execute("SELECT expires_at FROM sessions WHERE token = %s", (token,)).fetchone()
         if row is None:
             return None
         if row["expires_at"] <= utc_now():
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE token = %s", (token,))
             return None
     return config.admin_user
 
@@ -73,7 +73,7 @@ def login(payload: LoginRequest, request: Request, response: Response):
     expires = (datetime.now(timezone.utc) + timedelta(hours=config.session_hours)).isoformat()
     with database() as conn:
         conn.execute(
-            "INSERT INTO sessions(token, created_at, expires_at) VALUES (?, ?, ?)",
+            "INSERT INTO sessions(token, created_at, expires_at) VALUES (%s, %s, %s)",
             (token, utc_now(), expires),
         )
     response.set_cookie(
@@ -93,7 +93,7 @@ def logout(request: Request, response: Response):
     token = request.cookies.get(COOKIE_NAME)
     if token:
         with database() as conn:
-            conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+            conn.execute("DELETE FROM sessions WHERE token = %s", (token,))
     response.delete_cookie(COOKIE_NAME, path="/")
     return {"status": "signed out"}
 

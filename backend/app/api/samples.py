@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, Query, Response
 
 from ..db import database, utc_now
 from ..schemas import SampleCreate, SampleUpdate
-from .common import create_sample, delete_asset, require_sample, response_for_sample
+from ..storage import delete_assets
+from .common import create_sample, require_sample, response_for_sample
 
 router = APIRouter(prefix="/api/samples", tags=["samples"])
 
@@ -25,7 +26,8 @@ def list_samples(
     order: Literal["asc", "desc"] = "desc",
 ):
     sort_columns = {"created_at": "s.created_at", "name": "s.name", "suspected_plastic": "COALESCE(a.suspected_plastic, 0)", "total_particles": "COALESCE(a.total_particles, 0)"}
-    where = "WHERE s.name LIKE ? OR COALESCE(s.location, '') LIKE ?" if search else ""
+    # ILIKE: Postgres' LIKE is case-sensitive, and the search box should not be.
+    where = "WHERE s.name ILIKE %s OR COALESCE(s.location, '') ILIKE %s" if search else ""
     parameters = [f"%{search}%", f"%{search}%"] if search else []
     latest_join = "LEFT JOIN analyses a ON a.id = (SELECT id FROM analyses WHERE sample_id = s.id ORDER BY id DESC LIMIT 1)"
     with database() as conn:
@@ -34,7 +36,7 @@ def list_samples(
             f"""SELECT s.*, a.id AS analysis_id, a.suspected_plastic, a.total_particles, a.concentration_per_l,
                        a.annotated_path, a.created_at AS analysis_created_at
                 FROM samples s {latest_join} {where}
-                ORDER BY {sort_columns[sort]} {order.upper()} LIMIT ? OFFSET ?""",
+                ORDER BY {sort_columns[sort]} {order.upper()} LIMIT %s OFFSET %s""",
             [*parameters, per_page, (page - 1) * per_page],
         ).fetchall()
     return {"items": [dict(row) for row in rows], "total": total, "page": page, "per_page": per_page}
@@ -51,10 +53,10 @@ def update_sample(sample_id: int, payload: SampleUpdate):
     values = payload.model_dump(exclude_unset=True)
     if not values:
         return require_sample(sample_id)
-    columns = ", ".join(f"{name} = ?" for name in values)
+    columns = ", ".join(f"{name} = %s" for name in values)
     with database() as conn:
-        conn.execute(f"UPDATE samples SET {columns}, updated_at = ? WHERE id = ?", [*values.values(), utc_now(), sample_id])
-        row = conn.execute("SELECT * FROM samples WHERE id = ?", (sample_id,)).fetchone()
+        conn.execute(f"UPDATE samples SET {columns}, updated_at = %s WHERE id = %s", [*values.values(), utc_now(), sample_id])
+        row = conn.execute("SELECT * FROM samples WHERE id = %s", (sample_id,)).fetchone()
     return dict(row)
 
 
@@ -62,9 +64,7 @@ def update_sample(sample_id: int, payload: SampleUpdate):
 def delete_sample(sample_id: int):
     require_sample(sample_id)
     with database() as conn:
-        paths = conn.execute("SELECT original_path, annotated_path, mask_path FROM analyses WHERE sample_id = ?", (sample_id,)).fetchall()
-        conn.execute("DELETE FROM samples WHERE id = ?", (sample_id,))
-    for row in paths:
-        for path in row:
-            delete_asset(path)
+        paths = conn.execute("SELECT original_path, annotated_path, mask_path FROM analyses WHERE sample_id = %s", (sample_id,)).fetchall()
+        conn.execute("DELETE FROM samples WHERE id = %s", (sample_id,))
+    delete_assets([path for row in paths for path in row.values()])
     return Response(status_code=204)

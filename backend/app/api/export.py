@@ -3,10 +3,9 @@ from __future__ import annotations
 import csv
 import io
 import json
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -14,7 +13,8 @@ from reportlab.lib.units import mm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from ..config import DISCLAIMER
-from .common import asset_path, response_for_sample
+from ..storage import AssetNotFound, read_asset
+from .common import response_for_sample
 
 router = APIRouter(prefix="/api", tags=["exports"])
 
@@ -24,6 +24,16 @@ def _result(sample_id: int) -> dict:
     if result["analysis"] is None:
         raise HTTPException(status_code=409, detail="The sample has no analysis to export")
     return result
+
+
+def _download(payload: bytes, media_type: str, filename: str) -> StreamingResponse:
+    # Streamed rather than buffered: a large sample's JSON export can pass the
+    # 4.5 MB cap Vercel puts on a function's response body.
+    return StreamingResponse(
+        iter([payload]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.get("/export/{sample_id}.csv")
@@ -39,14 +49,14 @@ def export_csv(sample_id: int):
     writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
-    return Response(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="sample-{sample_id}-particles.csv"'})
+    return _download(output.getvalue().encode("utf-8"), "text/csv", f"sample-{sample_id}-particles.csv")
 
 
 @router.get("/export/{sample_id}.json")
 def export_json(sample_id: int):
     result = _result(sample_id)
     data = {"disclaimer": DISCLAIMER, **result}
-    return Response(json.dumps(data, indent=2, default=str), media_type="application/json", headers={"Content-Disposition": f'attachment; filename="sample-{sample_id}.json"'})
+    return _download(json.dumps(data, indent=2, default=str).encode("utf-8"), "application/json", f"sample-{sample_id}.json")
 
 
 @router.get("/export/{sample_id}.pdf")
@@ -63,9 +73,12 @@ def export_pdf(sample_id: int):
     table = Table(metadata, colWidths=[45 * mm, 125 * mm])
     table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#9ab")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#e7f5f5")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
     story += [table, Spacer(1, 5 * mm)]
-    image_path = asset_path(analysis["annotated_path"])
-    if image_path.exists():
-        story.append(Image(str(image_path), width=175 * mm, height=131 * mm, kind="proportional"))
+    try:
+        annotated = io.BytesIO(read_asset(analysis["annotated_path"]))
+    except AssetNotFound:
+        annotated = None
+    if annotated is not None:
+        story.append(Image(annotated, width=175 * mm, height=131 * mm, kind="proportional"))
         story.append(Spacer(1, 5 * mm))
     records = [["ID", "Class", "Label", "Length", "Colour", "Confidence"]]
     for particle in analysis["particles"][:35]:
@@ -75,4 +88,4 @@ def export_pdf(sample_id: int):
     records_table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#bbc")), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0b7285")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("FONTSIZE", (0, 0), (-1, -1), 8), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
     story.append(records_table)
     document.build(story)
-    return Response(output.getvalue(), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="sample-{sample_id}-report.pdf"'})
+    return _download(output.getvalue(), "application/pdf", f"sample-{sample_id}-report.pdf")

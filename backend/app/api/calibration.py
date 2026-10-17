@@ -14,11 +14,11 @@ def create_calibration(payload: CalibrationCreate):
     mm_per_pixel = calculate_mm_per_pixel(payload.pixel_distance, payload.real_mm)
     with database() as conn:
         conn.execute("UPDATE calibrations SET is_active = 0")
-        cursor = conn.execute(
-            "INSERT INTO calibrations(mm_per_pixel, pixel_distance, real_mm, note, created_at, is_active) VALUES (?, ?, ?, ?, ?, 1)",
+        item = conn.execute(
+            "INSERT INTO calibrations(mm_per_pixel, pixel_distance, real_mm, note, created_at, is_active) "
+            "VALUES (%s, %s, %s, %s, %s, 1) RETURNING *",
             (mm_per_pixel, payload.pixel_distance, payload.real_mm, payload.note, utc_now()),
-        )
-        item = conn.execute("SELECT * FROM calibrations WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        ).fetchone()
     return dict(item)
 
 
@@ -32,10 +32,10 @@ def list_calibrations():
 @router.post("/active")
 def set_active_calibration(payload: CalibrationActivate):
     with database() as conn:
-        exists = conn.execute("SELECT id FROM calibrations WHERE id = ?", (payload.calibration_id,)).fetchone()
+        exists = conn.execute("SELECT id FROM calibrations WHERE id = %s", (payload.calibration_id,)).fetchone()
         if exists is None:
             raise HTTPException(status_code=404, detail="Calibration not found")
         conn.execute("UPDATE calibrations SET is_active = 0")
-        conn.execute("UPDATE calibrations SET is_active = 1 WHERE id = ?", (payload.calibration_id,))
-        item = conn.execute("SELECT * FROM calibrations WHERE id = ?", (payload.calibration_id,)).fetchone()
+        conn.execute("UPDATE calibrations SET is_active = 1 WHERE id = %s", (payload.calibration_id,))
+        item = conn.execute("SELECT * FROM calibrations WHERE id = %s", (payload.calibration_id,)).fetchone()
     return dict(item)

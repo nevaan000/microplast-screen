@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.api import common
 from backend.app.config import config
+from backend.app.db import initialize_database
 from backend.app.main import app
 from scripts.generate_synthetic import SYNTHETIC_MM_PER_PIXEL, generate_image
 
@@ -122,3 +123,22 @@ def test_concurrent_analyses_are_queued_and_release_their_slot(clean_data):
     assert statuses == [201, 201]
     assert common.ANALYSIS_SLOTS.acquire(timeout=5), "analysis slot was not released"
     common.ANALYSIS_SLOTS.release()
+
+
+def test_rerunning_the_schema_keeps_existing_rows(clean_data):
+    """Every function cold start applies the DDL again to a database that already has data."""
+    with TestClient(app) as client:
+        sample_id = client.post("/api/samples", json={"name": "Survives a cold start"}).json()["id"]
+        initialize_database()
+        assert client.get(f"/api/samples/{sample_id}").status_code == 200
+        assert client.get("/api/settings").status_code == 200
+        assert client.delete(f"/api/samples/{sample_id}").status_code == 204
+
+
+def test_health_publishes_an_upload_cap_the_platform_will_accept(clean_data):
+    """Vercel returns its own 413 at the edge above 4.5 MB, before our check can answer."""
+    with TestClient(app) as client:
+        body = client.get("/api/health").json()
+    assert body["status"] == "ok"
+    assert body["max_upload_mb"] == config.max_upload_mb
+    assert body["max_upload_mb"] <= 4

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 from datetime import datetime, timezone
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 import joblib
@@ -12,15 +12,17 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
 
-from ..config import config
+from ..storage import asset_exists, put_asset, read_asset
 
 FEATURE_NAMES = [
     "area_px", "perimeter_px", "length_px", "width_px", "aspect_ratio", "circularity", "solidity", "extent",
     "mean_r", "mean_g", "mean_b", "mean_h", "mean_s", "mean_v", "texture_std",
 ]
 CLASS_NAMES = ["fiber", "fragment", "film", "pellet", "non_plastic"]
-MODEL_PATH = config.models_dir / "microplast_rf.joblib"
-META_PATH = config.models_dir / "microplast_rf.json"
+# The classifier has to outlive a function instance, so it lives in asset storage
+# and is fetched once per instance rather than written to a local disk.
+MODEL_KEY = "models/microplast_rf.joblib"
+META_KEY = "models/microplast_rf.json"
 
 
 def _feature_vector(particle: dict[str, Any]) -> list[float]:
@@ -84,15 +86,16 @@ def _fit(rows: list[list[float]], labels: list[str], source: str) -> dict[str, A
             "feature_importance": {name: round(float(value), 5) for name, value in zip(FEATURE_NAMES, classifier.feature_importances_)},
         },
     }
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(classifier, MODEL_PATH)
-    META_PATH.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    buffer = io.BytesIO()
+    joblib.dump(classifier, buffer, compress=3)
+    put_asset(MODEL_KEY, buffer.getvalue(), "application/octet-stream")
+    put_asset(META_KEY, json.dumps(metadata, indent=2).encode("utf-8"), "application/json")
     load_model.cache_clear()
     return metadata
 
 
 def ensure_starter_model() -> dict[str, Any]:
-    if MODEL_PATH.exists() and META_PATH.exists():
+    if asset_exists(MODEL_KEY) and asset_exists(META_KEY):
         return model_status()
     rows, labels = synthetic_training_rows()
     return _fit(rows, labels, "starter model trained on synthetic data")
@@ -101,19 +104,19 @@ def ensure_starter_model() -> dict[str, Any]:
 @lru_cache(maxsize=1)
 def load_model() -> RandomForestClassifier:
     ensure_starter_model()
-    return joblib.load(MODEL_PATH)
+    return joblib.load(io.BytesIO(read_asset(MODEL_KEY)))
 
 
 def model_status() -> dict[str, Any]:
     # Both artefacts must exist: metadata without a model file would report
     # metrics for a classifier that cannot actually make predictions.
-    if not (MODEL_PATH.exists() and META_PATH.exists()):
+    if not (asset_exists(MODEL_KEY) and asset_exists(META_KEY)):
         return ensure_starter_model()
-    return json.loads(META_PATH.read_text(encoding="utf-8"))
+    return json.loads(read_asset(META_KEY))
 
 
 def predict_particle(particle: dict[str, Any]) -> dict[str, Any] | None:
-    if not MODEL_PATH.exists():
+    if not asset_exists(MODEL_KEY):
         ensure_starter_model()
     classifier = load_model()
     probabilities = classifier.predict_proba([_feature_vector(particle)])[0]

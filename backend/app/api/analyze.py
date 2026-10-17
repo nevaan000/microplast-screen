@@ -4,14 +4,16 @@ from datetime import datetime
 from typing import Any
 
 import cv2
+import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from ..config import config
 from ..db import active_calibration, database, get_settings
 from ..schemas import DemoRequest
-from .common import analysis_slot, asset_path, create_sample, decode_image, get_analysis, persist_analysis, require_sample
+from ..storage import AssetNotFound, read_asset, stream_asset
+from .common import analysis_slot, create_sample, decode_image, get_analysis, persist_analysis, require_sample
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
@@ -80,11 +82,15 @@ async def analyze_upload(
 def reanalyze_sample(sample_id: int):
     sample = require_sample(sample_id)
     with database() as conn:
-        latest = conn.execute("SELECT original_path FROM analyses WHERE sample_id = ? ORDER BY id DESC LIMIT 1", (sample_id,)).fetchone()
+        latest = conn.execute("SELECT original_path FROM analyses WHERE sample_id = %s ORDER BY id DESC LIMIT 1", (sample_id,)).fetchone()
     if latest is None:
         raise HTTPException(status_code=409, detail="Sample has no prior image to re-analyse")
     with analysis_slot():
-        image = cv2.imread(str(asset_path(latest["original_path"])), cv2.IMREAD_COLOR)
+        try:
+            stored = read_asset(latest["original_path"])
+        except AssetNotFound:
+            raise HTTPException(status_code=410, detail="The stored image file is unavailable") from None
+        image = cv2.imdecode(np.frombuffer(stored, dtype=np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise HTTPException(status_code=410, detail="The stored image file is unavailable")
         analysis = persist_analysis(sample_id, [image], sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
@@ -92,14 +98,19 @@ def reanalyze_sample(sample_id: int):
 
 
 @router.get("/images/{analysis_id}/{image_kind}")
-def get_analysis_image(analysis_id: int, image_kind: str):
+async def get_analysis_image(analysis_id: int, image_kind: str):
     if image_kind not in {"original", "annotated", "mask"}:
         raise HTTPException(status_code=404, detail="Image kind must be original, annotated, or mask")
-    analysis = get_analysis(analysis_id, with_particles=False)
-    path = asset_path(analysis[f"{image_kind}_path"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Image file not found")
-    return FileResponse(path, media_type="image/png")
+    analysis = await run_in_threadpool(get_analysis, analysis_id, False)
+    try:
+        content_type, chunks = await stream_asset(analysis[f"{image_kind}_path"])
+    except AssetNotFound:
+        raise HTTPException(status_code=404, detail="Image file not found") from None
+    return StreamingResponse(
+        chunks,
+        media_type=content_type,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-cache"},
+    )
 
 
 @router.post("/demo/generate", status_code=201)

@@ -7,23 +7,42 @@ MicroPlast Screen is a local visual-screening application for filter images from
 ## Requirements
 
 - Python 3.10 or newer
+- A Postgres server — a local Docker container or a free Neon branch
 - A current desktop browser
 - An ESP32-CAM and a USB-to-UART adapter only for camera capture
 - PlatformIO only for firmware builds and flashing
 
-No Node.js installation is required. The backend serves the static frontend and stores data locally in SQLite.
+No Node.js installation is required. The backend serves the static frontend itself. Every record lives in Postgres; images and the trained classifier go to a Vercel Blob store when one is configured and to `DATA_DIR` otherwise.
 
 ## Start the application
 
 Run these commands from the project root.
 
-### Windows
+### 1. Provide a database
+
+The application refuses to start without `DATABASE_URL`. Start a throwaway Postgres in Docker:
+
+```sh
+docker run -d --name mps-postgres -e POSTGRES_USER=microplast -e POSTGRES_PASSWORD=microplast_dev_only -e POSTGRES_DB=microplast -p 5433:5432 postgres:17-alpine
+```
+
+then create `.env` from the template and set:
+
+```
+DATABASE_URL=postgresql://microplast:microplast_dev_only@127.0.0.1:5433/microplast
+```
+
+Any Postgres 13 or newer works, including a free Neon branch — use its pooled (`-pooler`) connection string. Tables and indexes are created on first boot.
+
+### 2. Start the server
+
+#### Windows
 
 ```bat
 run.bat
 ```
 
-### macOS and Linux
+#### macOS and Linux
 
 ```sh
 ./run.sh
@@ -98,66 +117,81 @@ Change the example key; it is intentionally public and unsuitable for use. Keep 
 
 Important `.env` values:
 
+- `DATABASE_URL`: required Postgres connection string. `POSTGRES_URL` is accepted as an alias.
+- `BLOB_STORE_ID` / `BLOB_READ_WRITE_TOKEN`: the Vercel Blob store that holds images and the trained classifier. Leave both empty to keep assets on disk instead.
+- `ASSET_BACKEND`: force `blob` or `local` regardless of the two values above.
+- `DATA_DIR`: local asset root, defaulting to `data`, and to `/tmp/data` on Vercel where the project directory is read-only.
 - `DEVICE_API_KEY`: shared credential for device-control and device-upload requests.
 - `ESP32_IP`: camera hostname or IP address, optionally with a port; do not include `http://`.
-- `MAX_UPLOAD_MB`: maximum accepted upload size.
+- `MAX_UPLOAD_MB`: maximum accepted upload size. The default of 4 MB sits under the 4.5 MB request body that Vercel rejects at the edge before the application can answer.
 - `MAX_CONCURRENT_ANALYSES`: how many analyses may run at once, default 1. Extra requests wait for a free slot and return `503` if none opens within 90 seconds. Raise it only on hosts with memory to spare.
-- `DATA_DIR`: local storage root, defaulting to `data`.
 - `ADMIN_USER` / `ADMIN_PASSWORD`: dashboard login. Leave the password empty for local use without a login; set it before publishing.
 - `SESSION_HOURS`: how long a sign-in session stays valid, default 12.
 
-The application stores its SQLite database at `data/microplastic.db`. Uploaded originals, annotated images, and masks are stored in `data/raw`, `data/processed`, and `data/masks`, and the shape classifier is stored in `data/models`. Delete samples through the History page so database records and generated assets are removed together.
+Records — samples, analyses, particles, calibrations, settings, and sessions — live in Postgres. Assets — uploaded originals, annotated images, masks, and the classifier — live in the Blob store under `raw/`, `processed/`, `masks/`, and `models/`, or in the same-named folders under `DATA_DIR` when no store is configured. Delete samples through the History page so records and assets are removed together.
 
-Every stored path is relative to `DATA_DIR`, so the directory can be moved or mounted anywhere — including outside the project folder, as a container volume requires.
+Every stored asset path is relative and uses forward slashes, so the same database rows resolve against either backend — a laptop's `data/` folder or a private Blob store.
 
-## Publishing on a container host
+## Publishing
 
-The backend serves the dashboard itself, so a single container provides one public URL for both the UI and the API. A static host such as Vercel is not needed for the frontend and cannot run the backend at all: OpenCV analysis and the SQLite database need a persistent disk and more request time than serverless functions allow.
+The backend serves the dashboard itself, so one deployment gives a single public URL for both the UI and the API.
 
-Build and run the image locally:
+### Vercel (free)
+
+The Python runtime loads `main.py` at the project root, which re-exports the FastAPI `app`. `vercel.json` sets a 300-second `maxDuration` — an analysis of ten 1600×1200 frames needs it — and keeps firmware, docs, tests, and the local data folder out of the function bundle.
+
+1. **Create a Neon database.** In the Vercel dashboard choose **Storage → Create Database → Neon** and attach it to the project. Vercel then sets `POSTGRES_URL`, which the application reads as an alias for `DATABASE_URL`; if you paste a connection string yourself, use the pooled (`-pooler`) one.
+2. **Create a Blob store.** Choose **Storage → Create Store → Blob** and select **private**. Visibility cannot be changed afterwards, and this app serves every asset through an authenticated route, so a public store would protect sample images with nothing but unguessable URLs. Attaching the store sets `BLOB_STORE_ID` and `BLOB_READ_WRITE_TOKEN`.
+3. **Add the secrets.** In **Project → Settings → Environment Variables** set `ADMIN_PASSWORD` to a long random value — without it the dashboard is published with no login at all — and `DEVICE_API_KEY` to a generated key (`python -c "import secrets; print(secrets.token_urlsafe(32))"`), which also goes into `firmware/esp32-cam/include/secrets.h`.
+4. **Import the repository** and deploy. There is no build command and no output directory; `requirements.txt` and `.python-version` are detected automatically.
+
+The free tier shapes the deployment in ways worth knowing:
+
+- **Hobby functions get 1024 MB in a single region.** `MAX_CONCURRENT_ANALYSES=1` keeps a maximum-size analysis inside that budget, and further analyses queue behind it.
+- **A request body above 4.5 MB is refused at the edge**, so `MAX_UPLOAD_MB` defaults to 4 and the dashboard rejects an oversized selection before posting it. Responses share that cap but streaming is exempt, which is why images and exports are streamed.
+- **The project directory is read-only, and `/tmp` does not survive between invocations.** Assets therefore go to Blob and records to Postgres. A device capture's frames wait in the store under a `raw/session-…` prefix rather than on disk, so frames that land on different instances still meet up.
+- **Blob's free allowance is 1 GB of storage and 10,000 simple operations a month**, and each image the dashboard displays costs one read.
+- **Nothing retrains on a cold start.** The starter classifier is trained once into `models/` in the store and reloaded per instance, so a redeploy keeps it — along with any model retrained in the ML lab.
+- **Sign-in rate limiting is per instance.** The failed-attempt counter lives in one function's memory, so it slows a casual attack rather than stopping a distributed one. A strong `ADMIN_PASSWORD` is what actually protects the dashboard.
+
+### Container host
+
+Build and run the image locally, against the same Postgres:
 
 ```sh
 docker build -t microplast-screen .
-docker run --rm -p 8000:8000 -v microplast-data:/data -e ADMIN_PASSWORD=pick-a-long-password -e DEVICE_API_KEY=pick-a-device-key microplast-screen
+docker run --rm -p 8000:8000 -v microplast-data:/data \
+  -e DATABASE_URL=postgresql://microplast:microplast_dev_only@host.docker.internal:5433/microplast \
+  -e ADMIN_PASSWORD=pick-a-long-password -e DEVICE_API_KEY=pick-a-device-key microplast-screen
 ```
 
-The database, generated images, and trained classifier live in the `/data` volume; without a volume they disappear when the container is replaced. The first boot trains the starter classifier into `/data/models`, which takes about 20 seconds; later boots load it from the volume instead.
+Generated images and the trained classifier live in the `/data` volume; without one they disappear when the container is replaced, and every boot retrains the starter classifier for about 20 seconds. Set `BLOB_STORE_ID` and `BLOB_READ_WRITE_TOKEN` instead to keep assets in Blob and run as many instances as you like.
 
-### Render
+#### Render
 
-`render.yaml` describes the deployment as a Render Blueprint: a Docker web service, a 1 GB persistent disk mounted at `/data`, a health check on `/api/health`, and the three environment variables that must be set.
+`render.yaml` describes the deployment as a Render Blueprint: a Docker web service, a 1 GB persistent disk mounted at `/data`, a health check on `/api/health`, and the environment variables the service needs.
 
 1. Push this repository to GitHub.
-2. In Render choose **New → Blueprint**, connect the repository, and apply it. Render reads `render.yaml` and prompts for `ADMIN_PASSWORD`; enter a long random password. `DEVICE_API_KEY` is generated once — copy it from the service's Environment tab into `firmware/esp32-cam/include/secrets.h`.
+2. In Render choose **New → Blueprint**, connect the repository, and apply it. Render reads `render.yaml` and prompts for `ADMIN_PASSWORD` and `DATABASE_URL`; enter a long random password and the pooled connection string of a Postgres (a free Neon branch works). `DEVICE_API_KEY` is generated once — copy it from the service's Environment tab into `firmware/esp32-cam/include/secrets.h`.
 3. When the build finishes, open `https://<service-name>.onrender.com` and sign in.
 
-The blueprint deliberately leaves out `ADMIN_USER`, `SESSION_HOURS`, `MAX_UPLOAD_MB`, `MAX_CONCURRENT_ANALYSES`, and `ESP32_IP` so their code defaults keep applying; add them in the service's Environment tab if you need to override one.
+The blueprint deliberately leaves out `ADMIN_USER`, `SESSION_HOURS`, `MAX_UPLOAD_MB`, `MAX_CONCURRENT_ANALYSES`, `BLOB_STORE_ID`, `BLOB_READ_WRITE_TOKEN`, and `ESP32_IP` so their code defaults keep applying; add them in the service's Environment tab if you need to override one.
 
 Three settings in the blueprint are deliberate:
 
-- **A persistent disk requires a paid instance**, so `plan` is `starter`, the cheapest tier that can mount `/data`. On the free plan the disk cannot be attached at all, and every deploy or restart discards the database, the uploaded images, and any retrained classifier.
-- **`numInstances` must stay at 1.** The SQLite database and image files are local to the instance, so a second replica would keep its own separate data.
+- **A persistent disk requires a paid instance**, so `plan` is `starter`, the cheapest tier that can mount `/data`. On the free plan the disk cannot be attached at all, and every deploy or restart discards the uploaded images and any retrained classifier.
+- **`numInstances` must stay at 1.** The image files live on the instance's own disk, so a second replica would keep a separate set of assets behind the same database rows. Configure a Blob store to lift that restriction.
 - **Analyses are queued, not run in parallel**, because a starter instance has 512 MB of memory. Measured at exactly 0.5 CPU and 512 MB, two and three simultaneous maximum-size uploads — ten 1600×1200 frames each — completed with no OOM kill, peaking at 399–449 MiB of process memory, while `/api/health` answered every probe in under 300 ms. Under three-way load the 90 s queue wait is occasionally exceeded and a request is shed with `503`. Offloading the work off the event loop matters as much as the queue: without it, the same two-way load blocked `/api/health` for 30 s at a time, which is enough for a platform health check to fail and restart the instance. The image also caps malloc arenas and BLAS threads, worth a further ~35 MiB at peak. Raise `MAX_CONCURRENT_ANALYSES` only on a larger plan.
 
-### Railway and Fly.io
+#### Railway and Fly.io
 
-Deploy the repository as a Docker service, attach a persistent volume mounted at `/data` (Fly.io `fly.toml`: `mounts: source = "microplast_data"`, `destination = "/data"`; Railway: add a volume with mount path `/data`), set `ADMIN_PASSWORD` and `DEVICE_API_KEY`, and keep a single instance. Let the platform terminate HTTPS. Set `PORT` only if the platform requires a specific value; the image honours it.
+Deploy the repository as a Docker service, attach a persistent volume mounted at `/data` (Fly.io `fly.toml`: `mounts: source = "microplast_data"`, `destination = "/data"`; Railway: add a volume with mount path `/data`), set `DATABASE_URL`, `ADMIN_PASSWORD` and `DEVICE_API_KEY`, and keep a single instance. Let the platform terminate HTTPS. Set `PORT` only if the platform requires a specific value; the image honours it.
 
 Point the ESP32-CAM at the public address by setting `SERVER_URL` in `firmware/esp32-cam/include/secrets.h` to the HTTPS URL, for example `https://microplast-screen.onrender.com`. The firmware authenticates with `DEVICE_API_KEY`, exactly as on the LAN, and device upload is exempt from the session-cookie login precisely so the camera can post without signing in.
 
 One caveat applies to TLS on the camera: `uploader.cpp` calls `HTTPClient::begin()` with no certificate authority supplied, so the ESP32 Arduino core opens the TLS connection **without validating the server certificate**. Traffic is encrypted against a passive listener, but the `DEVICE_API_KEY` is not protected from an attacker who can spoof DNS on the camera's network path. If that matters for your deployment, bundle a root CA with the firmware and pass it to `WiFiClientSecure::setCACert()`, or keep the camera on a LAN that reaches the backend over plain HTTP.
 
 Never publish an instance without `ADMIN_PASSWORD`: anyone who learns the URL could read, upload, and delete samples.
-
-### Optional: serve the dashboard from Vercel
-
-Vercel cannot run the Python backend, but it can host the static dashboard and proxy the API to your container host, giving you one public Vercel URL for everything. `vercel.json` already contains the routing: `/api/*`, `/docs`, and `/openapi.json` are rewritten to an external origin, and every other path is served from `frontend/`.
-
-1. Replace the four `https://YOUR-BACKEND-HOST.example.com` destinations in `vercel.json` with your container host's HTTPS URL. The placeholder is deliberately invalid so a forgotten edit fails loudly instead of proxying to the wrong host.
-2. In the Vercel dashboard, import this repository as an **Other** project with no build command and no output directory, then deploy.
-3. Keep `ADMIN_PASSWORD` and `DEVICE_API_KEY` set on the container host; Vercel needs no secrets of its own.
-
-Because the proxy keeps the browser on a single origin, the session cookie and the device upload flow work exactly as they do when the backend serves the dashboard itself. API responses are never cached by Vercel's CDN (`x-vercel-enable-rewrite-caching: 0`), so sample lists and results always come from the backend. The ESP32-CAM can post to either URL; both authenticate with `DEVICE_API_KEY`.
 
 ## Screening workflows
 
@@ -345,15 +379,15 @@ These assumptions were made while building the system. Change them in **Settings
 - **Imaging geometry is fixed.** Camera distance, focus, resolution, and filter position are assumed constant between a calibration and the samples that use it. Any change invalidates the active calibration.
 - **One filter per sample.** All frames in a single analysis are assumed to be the same filter at the same scale, which is what makes per-pixel median stacking valid.
 - **Frame size.** Input images are assumed to be at most 1600×1200, the ESP32-CAM UXGA maximum. Processing happens at full resolution without downscaling.
-- **Accepted formats.** Only JPEG and PNG are accepted, up to `MAX_UPLOAD_MB` (default 10 MB) per file.
+- **Accepted formats.** Only JPEG and PNG are accepted, up to `MAX_UPLOAD_MB` (default 4 MB) across all frames of one request.
 - **Volume is optional.** Concentration in particles per litre is reported only when a sampled volume in millilitres is supplied; otherwise it stays null rather than being estimated.
 - **Default classifier.** `classifier_mode` defaults to `hybrid`. When no trained model file exists, a starter RandomForest is trained on synthetic data and is labelled as such in the UI. Its accuracy reflects synthetic variety, not your samples.
 - **Microplastic size definition.** The 5 mm upper bound of the common microplastic definition is used for the largest size bin, which is flagged rather than counted silently.
 - **Minimum reliable size.** Detection is treated as reliable from `min_reliable_px` (default 5 px) upward, scaled by the active millimetres-per-pixel value. Smaller particles may appear but are not considered dependable.
 - **Device API key storage.** The browser keeps the device key in local storage for the current origin only. The authoritative key lives in the backend `.env` and is never sent to the browser.
 - **Network trust.** Device traffic between the camera and the backend is plain HTTP on a LAN by design, since the firmware has no certificate store; over a public HTTPS address the connection is encrypted but the server certificate is not validated. Dashboard traffic in public mode relies on the host terminating TLS.
-- **No internet at runtime.** Chart.js is vendored at `frontend/vendor/chart.umd.js`, so the dashboard works fully offline.
-- **Cross-platform storage.** All stored asset paths are relative to `DATA_DIR` and use forward slashes, so the data directory can move between Windows, macOS, and Linux, or be mounted outside the application directory as a container volume.
+- **No third-party CDN at runtime.** Chart.js is vendored at `frontend/vendor/chart.umd.js`, so the dashboard loads no external script. The backend still has to reach its Postgres, and Blob when a store is configured.
+- **Portable asset paths.** Stored asset paths are relative and use forward slashes, so the same database rows resolve under `DATA_DIR` on Windows, macOS, or Linux, in a container volume mounted outside the project directory, or in a Blob store.
 
 ## Known limitations
 
@@ -367,9 +401,11 @@ These assumptions were made while building the system. Change them in **Settings
 - **Classifier data quality.** Model accuracy depends entirely on the diversity and correctness of verified labels and synthetic training data. It is not independent laboratory validation.
 - **Single camera, single field of view.** Only what fits in one frame is analysed; there is no stage automation or mosaicking to cover a whole filter at high magnification.
 - **Environmental samples are harder than lab samples.** Real water samples contain far more interfering material than the synthetic demos.
-- **Single-user scope.** The optional login is one shared account, not a multi-user system: there is no per-user isolation, no role separation, and no audit trail beyond the database timestamps. SQLite and the on-disk image files also mean the service must run as a single instance.
+- **Single-user scope.** The optional login is one shared account, not a multi-user system: there is no per-user isolation, no role separation, and no audit trail beyond the database timestamps. With assets on a local disk the service must also run as a single instance; configuring a Blob store lifts that.
 - **Live camera control needs network reach.** The Device page's preview, LED, capture, and camera-settings calls are made *by the backend* to `http://<camera>/…`. A publicly hosted backend cannot route to a private LAN address such as `192.168.1.50`, so those controls report the camera as offline. This is a network constraint, not a software fault. The reverse direction is unaffected: the camera pushes captures to the public HTTPS URL and they are analysed normally. To drive a LAN camera remotely you would need to expose it through a tunnel, which also requires allowing an `https://` camera address in `device.py`.
 - **Analyses are serialised by default.** A second capture waits for the first to finish instead of running alongside it, so if several cameras upload at once the last one can wait tens of seconds — longer than the firmware's 20 s HTTP timeout — and a request that gets no slot within 90 seconds is shed with `503`. The backend keeps working after a camera disconnects, so a timed-out upload is still analysed and stored; the firmware's retry can therefore leave two analyses for one sample, and the dashboard shows the latest. Raise `MAX_CONCURRENT_ANALYSES` once the host has memory to spare.
+- **The queue is per process.** `MAX_CONCURRENT_ANALYSES` is a semaphore inside one instance, so a host running several instances allows that many analyses at once and the memory ceiling applies per instance rather than overall.
+- **Serverless storage costs an operation per read.** With assets in Blob, displaying a sample's three images is three reads against the monthly allowance, and a cold instance re-reads the trained classifier.
 
 ## Future scope
 
@@ -390,10 +426,12 @@ These assumptions were made while building the system. Change them in **Settings
 
 ## Tests
 
-Run the backend test suite from the project root:
+The suite needs a Postgres it can truncate; the container from step 1 works. Run it from the project root:
 
 ```sh
 python -m pytest backend/tests
 ```
 
-The test suite covers the image pipeline, circular ROI handling, calibration behavior, API upload/export/delete flow, and device-upload authentication.
+`backend/tests/conftest.py` points `DATABASE_URL` at `postgresql://microplast:microplast_dev_only@127.0.0.1:5433/microplast` unless `TEST_DATABASE_URL` says otherwise. It never falls back to an inherited connection string, because the fixture truncates every table. Assets stay on disk under `data/` (`ASSET_BACKEND=local`), so a run spends no Blob quota and needs no network access.
+
+The suite covers the image pipeline, circular ROI handling, calibration behaviour, API upload/export/delete flow, device-upload authentication, the concurrency guard, and the asset-storage layout.

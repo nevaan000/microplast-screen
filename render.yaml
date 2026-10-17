@@ -3,10 +3,12 @@ services:
     name: microplast-screen
     runtime: docker
     # Persistent disks require a paid instance; "free" cannot mount /data and
-    # would lose the database, uploaded images and trained model on every deploy.
+    # would lose the uploaded images and trained model on every deploy.
     plan: starter
     region: oregon
-    # SQLite and the image files are local to one instance: never scale this out.
+    # Images are written to the local disk of one instance: never scale this
+    # out. Postgres records are shared, the files behind them are not. Set
+    # BLOB_STORE_ID and BLOB_READ_WRITE_TOKEN instead to run several instances.
     numInstances: 1
     healthCheckPath: /api/health
     dockerfilePath: ./Dockerfile
@@ -19,6 +21,10 @@ services:
       # Must match the disk mountPath above.
       - key: DATA_DIR
         value: /data
+      # Records live in Postgres. Use the pooled (-pooler) Neon connection
+      # string; Render prompts for it on the first deploy.
+      - key: DATABASE_URL
+        sync: false
       # Render generates a strong random value once; copy it into the firmware
       # secrets.h as DEVICE_API_KEY so the ESP32-CAM can upload.
       - key: DEVICE_API_KEY

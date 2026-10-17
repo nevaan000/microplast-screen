@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,8 +54,10 @@ async def require_session(request: Request, call_next):
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    # The upload cap is published so the dashboard can reject an oversized
+    # selection itself; a platform edge would answer with its own 413 body.
+    return {"status": "ok", "max_upload_mb": config.max_upload_mb}
 
 
 app.include_router(auth.router)
