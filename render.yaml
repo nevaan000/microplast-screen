@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: microplast-screen
+    runtime: docker
+    # Persistent disks require a paid instance; "free" cannot mount /data and
+    # would lose the database, uploaded images and trained model on every deploy.
+    plan: starter
+    region: oregon
+    # SQLite and the image files are local to one instance: never scale this out.
+    numInstances: 1
+    healthCheckPath: /api/health
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    disk:
+      name: microplast-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      # Must match the disk mountPath above.
+      - key: DATA_DIR
+        value: /data
+      # Render generates a strong random value once; copy it into the firmware
+      # secrets.h as DEVICE_API_KEY so the ESP32-CAM can upload.
+      - key: DEVICE_API_KEY
+        generateValue: true
+      # sync: false makes Render prompt for this on first deploy. Leaving it
+      # empty publishes the dashboard with no login at all.
+      - key: ADMIN_PASSWORD
+        sync: false

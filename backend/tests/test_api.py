@@ -1,7 +1,10 @@
+from pathlib import Path
+
 import cv2
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.config import config
 from backend.app.main import app
 from scripts.generate_synthetic import SYNTHETIC_MM_PER_PIXEL, generate_image
 
@@ -68,3 +71,26 @@ def test_demo_does_not_create_a_calibration(clean_data):
         assert len(after["items"]) == len(before["items"])
         assert after["active"] == before["active"]
         assert client.delete(f"/api/samples/{body['sample']['id']}").status_code == 204
+
+
+def test_asset_paths_survive_a_data_directory_outside_the_app_root(clean_data):
+    """A container mounts DATA_DIR outside the code directory, so stored paths must resolve against it."""
+    with TestClient(app) as client:
+        sample_id = client.post("/api/samples", json={"name": "Volume mount", "volume_ml": 100}).json()["id"]
+        response = client.post(
+            "/api/analyze",
+            data={"sample_id": str(sample_id)},
+            files=[("images", ("filter.jpg", _jpeg_bytes(), "image/jpeg"))],
+        )
+        assert response.status_code == 201
+        analysis = response.json()["analysis"]
+
+        stored = Path(analysis["annotated_path"])
+        assert not stored.is_absolute()
+        assert stored.parts[0] == "processed"
+        annotated = config.data_dir / stored
+        assert annotated.is_file()
+
+        assert client.post(f"/api/samples/{sample_id}/reanalyze").status_code == 200
+        assert client.delete(f"/api/samples/{sample_id}").status_code == 204
+        assert not annotated.exists()

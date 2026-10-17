@@ -9,14 +9,13 @@ data/processed/*
 data/masks/*
 data/calibration/*
 data/exports/*
+data/models/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/masks/.gitkeep
 !data/calibration/.gitkeep
 !data/exports/.gitkeep
-backend/app/ml/models/*.joblib
-backend/app/ml/models/*.json
-firmware/esp32-cam/include/secrets.h
+!data/models/.gitkeep
 .pio/
 .pytest_cache/
-.pytest-data-*/
+firmware/esp32-cam/include/secrets.h

@@ -13,8 +13,8 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from ..config import DISCLAIMER, config
-from .common import response_for_sample
+from ..config import DISCLAIMER
+from .common import asset_path, response_for_sample
 
 router = APIRouter(prefix="/api", tags=["exports"])
 
@@ -63,7 +63,7 @@ def export_pdf(sample_id: int):
     table = Table(metadata, colWidths=[45 * mm, 125 * mm])
     table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#9ab")), ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#e7f5f5")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
     story += [table, Spacer(1, 5 * mm)]
-    image_path = config.root_dir / analysis["annotated_path"]
+    image_path = asset_path(analysis["annotated_path"])
     if image_path.exists():
         story.append(Image(str(image_path), width=175 * mm, height=131 * mm, kind="proportional"))
         story.append(Spacer(1, 5 * mm))

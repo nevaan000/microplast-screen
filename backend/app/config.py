@@ -51,8 +51,12 @@ class AppConfig:
     def exports_dir(self) -> Path:
         return self.data_dir / "exports"
 
+    @property
+    def models_dir(self) -> Path:
+        return self.data_dir / "models"
+
     def ensure_directories(self) -> None:
-        for directory in (self.data_dir, self.raw_dir, self.processed_dir, self.masks_dir, self.calibration_dir, self.exports_dir):
+        for directory in (self.data_dir, self.raw_dir, self.processed_dir, self.masks_dir, self.calibration_dir, self.exports_dir, self.models_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
 

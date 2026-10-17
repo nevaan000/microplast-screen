@@ -1,6 +1,13 @@
 import json
 
+from backend.app.config import config
 from backend.app.ml import model
+
+
+def test_model_artefacts_live_in_the_data_directory():
+    """A retrained classifier must persist on the mounted volume, not inside the image."""
+    assert config.data_dir in model.MODEL_PATH.parents
+    assert config.data_dir in model.META_PATH.parents
 
 
 def test_model_status_does_not_report_metrics_for_a_missing_model(tmp_path, monkeypatch):

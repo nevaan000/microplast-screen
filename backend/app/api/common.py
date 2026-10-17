@@ -55,7 +55,12 @@ def _write_image(directory: Path, prefix: str, image: np.ndarray) -> str:
     target = directory / filename
     if not cv2.imwrite(str(target), image):
         raise RuntimeError(f"Could not write image {target.name}")
-    return target.relative_to(config.root_dir).as_posix()
+    return target.relative_to(config.data_dir).as_posix()
+
+
+def asset_path(relative_path: str) -> Path:
+    """Resolve a stored asset path against DATA_DIR, which may sit outside the app directory."""
+    return config.data_dir / relative_path
 
 
 def persist_analysis(
@@ -134,7 +139,7 @@ def response_for_sample(sample_id: int) -> dict[str, Any]:
 
 
 def delete_asset(relative_path: str) -> None:
-    path = (config.root_dir / relative_path).resolve()
+    path = asset_path(relative_path).resolve()
     data_root = config.data_dir.resolve()
     if data_root not in path.parents:
         return

@@ -2,7 +2,6 @@
 .gitignore
 .venv
 .pytest_cache
-.pytest-data-*
 .pio
 .env
 data
@@ -10,3 +9,5 @@ docs
 firmware
 Dockerfile
 .dockerignore
+render.yaml
+vercel.json

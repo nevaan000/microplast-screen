@@ -19,8 +19,8 @@ FEATURE_NAMES = [
     "mean_r", "mean_g", "mean_b", "mean_h", "mean_s", "mean_v", "texture_std",
 ]
 CLASS_NAMES = ["fiber", "fragment", "film", "pellet", "non_plastic"]
-MODEL_PATH = config.root_dir / "backend" / "app" / "ml" / "models" / "microplast_rf.joblib"
-META_PATH = config.root_dir / "backend" / "app" / "ml" / "models" / "microplast_rf.json"
+MODEL_PATH = config.models_dir / "microplast_rf.joblib"
+META_PATH = config.models_dir / "microplast_rf.json"
 
 
 def _feature_vector(particle: dict[str, Any]) -> list[float]:

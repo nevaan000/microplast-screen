@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from ..config import config
 from ..db import active_calibration, database, get_settings
 from ..schemas import DemoRequest
-from .common import create_sample, decode_image, get_analysis, persist_analysis, require_sample
+from .common import asset_path, create_sample, decode_image, get_analysis, persist_analysis, require_sample
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
@@ -63,7 +63,7 @@ def reanalyze_sample(sample_id: int):
         latest = conn.execute("SELECT original_path FROM analyses WHERE sample_id = ? ORDER BY id DESC LIMIT 1", (sample_id,)).fetchone()
     if latest is None:
         raise HTTPException(status_code=409, detail="Sample has no prior image to re-analyse")
-    image = cv2.imread(str(config.root_dir / latest["original_path"]), cv2.IMREAD_COLOR)
+    image = cv2.imread(str(asset_path(latest["original_path"])), cv2.IMREAD_COLOR)
     if image is None:
         raise HTTPException(status_code=410, detail="The stored image file is unavailable")
     analysis = persist_analysis(sample_id, [image], sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
@@ -75,7 +75,7 @@ def get_analysis_image(analysis_id: int, image_kind: str):
     if image_kind not in {"original", "annotated", "mask"}:
         raise HTTPException(status_code=404, detail="Image kind must be original, annotated, or mask")
     analysis = get_analysis(analysis_id, with_particles=False)
-    path = config.root_dir / analysis[f"{image_kind}_path"]
+    path = asset_path(analysis[f"{image_kind}_path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="Image file not found")
     return FileResponse(path, media_type="image/png")

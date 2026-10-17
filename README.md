@@ -105,7 +105,9 @@ Important `.env` values:
 - `ADMIN_USER` / `ADMIN_PASSWORD`: dashboard login. Leave the password empty for local use without a login; set it before publishing.
 - `SESSION_HOURS`: how long a sign-in session stays valid, default 12.
 
-The application stores its SQLite database at `data/microplastic.db`. Uploaded originals, annotated images, and masks are stored in `data/raw`, `data/processed`, and `data/masks`. Delete samples through the History page so database records and generated assets are removed together.
+The application stores its SQLite database at `data/microplastic.db`. Uploaded originals, annotated images, and masks are stored in `data/raw`, `data/processed`, and `data/masks`, and the shape classifier is stored in `data/models`. Delete samples through the History page so database records and generated assets are removed together.
+
+Every stored path is relative to `DATA_DIR`, so the directory can be moved or mounted anywhere — including outside the project folder, as a container volume requires.
 
 ## Publishing on a container host
 
@@ -118,11 +120,30 @@ docker build -t microplast-screen .
 docker run --rm -p 8000:8000 -v microplast-data:/data -e ADMIN_PASSWORD=pick-a-long-password -e DEVICE_API_KEY=pick-a-device-key microplast-screen
 ```
 
-The database and generated images live in the `/data` volume; without a volume they disappear when the container is replaced.
+The database, generated images, and trained classifier live in the `/data` volume; without a volume they disappear when the container is replaced. The first boot trains the starter classifier into `/data/models`, which takes about 20 seconds; later boots load it from the volume instead.
 
-On Render, Railway, or Fly.io, deploy this repository as a Docker service, attach a persistent disk mounted at `/data` (Fly.io `fly.toml`: `mounts: source=microplast_data, destination=/data`; Render: add a disk at `/data`; Railway: add a volume with mount path `/data`), set `ADMIN_PASSWORD` and `DEVICE_API_KEY` as environment variables, and let the platform terminate HTTPS. Set `PORT` only if the platform requires a specific value; the image honours it.
+### Render
 
-Point the ESP32-CAM at the public address by setting `SERVER_URL` in `firmware/esp32-cam/include/secrets.h` to the HTTPS URL, for example `https://microplast-screen.onrender.com`. The firmware uploads over HTTPS and authenticates with `DEVICE_API_KEY`, exactly as on the LAN.
+`render.yaml` describes the deployment as a Render Blueprint: a Docker web service, a 1 GB persistent disk mounted at `/data`, a health check on `/api/health`, and the three environment variables that must be set.
+
+1. Push this repository to GitHub.
+2. In Render choose **New → Blueprint**, connect the repository, and apply it. Render reads `render.yaml` and prompts for `ADMIN_PASSWORD`; enter a long random password. `DEVICE_API_KEY` is generated once — copy it from the service's Environment tab into `firmware/esp32-cam/include/secrets.h`.
+3. When the build finishes, open `https://<service-name>.onrender.com` and sign in.
+
+The blueprint deliberately leaves out `ADMIN_USER`, `SESSION_HOURS`, `MAX_UPLOAD_MB`, and `ESP32_IP` so their code defaults keep applying; add them in the service's Environment tab if you need to override one.
+
+Two settings in the blueprint are deliberate:
+
+- **A persistent disk requires a paid instance**, so `plan` is `starter`, the cheapest tier that can mount `/data`. On the free plan the disk cannot be attached at all, and every deploy or restart discards the database, the uploaded images, and any retrained classifier.
+- **`numInstances` must stay at 1.** The SQLite database and image files are local to the instance, so a second replica would keep its own separate data.
+
+### Railway and Fly.io
+
+Deploy the repository as a Docker service, attach a persistent volume mounted at `/data` (Fly.io `fly.toml`: `mounts: source = "microplast_data"`, `destination = "/data"`; Railway: add a volume with mount path `/data`), set `ADMIN_PASSWORD` and `DEVICE_API_KEY`, and keep a single instance. Let the platform terminate HTTPS. Set `PORT` only if the platform requires a specific value; the image honours it.
+
+Point the ESP32-CAM at the public address by setting `SERVER_URL` in `firmware/esp32-cam/include/secrets.h` to the HTTPS URL, for example `https://microplast-screen.onrender.com`. The firmware authenticates with `DEVICE_API_KEY`, exactly as on the LAN, and device upload is exempt from the session-cookie login precisely so the camera can post without signing in.
+
+One caveat applies to TLS on the camera: `uploader.cpp` calls `HTTPClient::begin()` with no certificate authority supplied, so the ESP32 Arduino core opens the TLS connection **without validating the server certificate**. Traffic is encrypted against a passive listener, but the `DEVICE_API_KEY` is not protected from an attacker who can spoof DNS on the camera's network path. If that matters for your deployment, bundle a root CA with the firmware and pass it to `WiFiClientSecure::setCACert()`, or keep the camera on a LAN that reaches the backend over plain HTTP.
 
 Never publish an instance without `ADMIN_PASSWORD`: anyone who learns the URL could read, upload, and delete samples.
 
@@ -196,7 +217,7 @@ copy firmware\esp32-cam\include\secrets.h.example firmware\esp32-cam\include\sec
 cp firmware/esp32-cam/include/secrets.h.example firmware/esp32-cam/include/secrets.h
 ```
 
-Set `WIFI_SSID`, `WIFI_PASS`, `DEVICE_NAME`, `SERVER_URL`, and `DEVICE_API_KEY` in `secrets.h`. `SERVER_URL` must be the LAN address of the computer running this backend, including its port, such as `http://192.168.1.50:8000`. The firmware and backend `DEVICE_API_KEY` values must match exactly.
+Set `WIFI_SSID`, `WIFI_PASS`, `DEVICE_NAME`, `SERVER_URL`, and `DEVICE_API_KEY` in `secrets.h`. `SERVER_URL` is the LAN address of the computer running this backend, including its port, such as `http://192.168.1.50:8000`, or the public HTTPS URL when the backend is published (see [Publishing on a container host](#publishing-on-a-container-host)). The firmware and backend `DEVICE_API_KEY` values must match exactly.
 
 The firmware registers `DEVICE_NAME` over mDNS, so the camera is also reachable at `http://microplast-cam.local/` when the network allows mDNS. Opening that address in a browser shows a bench-test page with a live frame and LED controls.
 
@@ -224,7 +245,7 @@ To flash an AI Thinker ESP32-CAM with a USB-to-UART adapter:
    python -m platformio device monitor --project-dir firmware/esp32-cam --baud 115200
    ```
 
-PlatformIO normally detects the connected serial adapter. If it cannot, identify the adapter with `python -m platformio device list`, then set the correct upload port in PlatformIO for that connected board before retrying. The camera and server must use the same trusted LAN.
+PlatformIO normally detects the connected serial adapter. If it cannot, identify the adapter with `python -m platformio device list`, then set the correct upload port in PlatformIO for that connected board before retrying. On a LAN deployment the camera and server must use the same trusted network.
 
 ### Firmware endpoints
 
@@ -328,9 +349,9 @@ These assumptions were made while building the system. Change them in **Settings
 - **Microplastic size definition.** The 5 mm upper bound of the common microplastic definition is used for the largest size bin, which is flagged rather than counted silently.
 - **Minimum reliable size.** Detection is treated as reliable from `min_reliable_px` (default 5 px) upward, scaled by the active millimetres-per-pixel value. Smaller particles may appear but are not considered dependable.
 - **Device API key storage.** The browser keeps the device key in local storage for the current origin only. The authoritative key lives in the backend `.env` and is never sent to the browser.
-- **Network trust.** The backend and the ESP32-CAM are assumed to share a trusted LAN. Device traffic is plain HTTP by design, since the camera firmware has no TLS certificate store.
+- **Network trust.** Device traffic between the camera and the backend is plain HTTP on a LAN by design, since the firmware has no certificate store; over a public HTTPS address the connection is encrypted but the server certificate is not validated. Dashboard traffic in public mode relies on the host terminating TLS.
 - **No internet at runtime.** Chart.js is vendored at `frontend/vendor/chart.umd.js`, so the dashboard works fully offline.
-- **Cross-platform storage.** All stored image paths are relative to the project root and use forward slashes, so a data directory can move between Windows, macOS, and Linux.
+- **Cross-platform storage.** All stored asset paths are relative to `DATA_DIR` and use forward slashes, so the data directory can move between Windows, macOS, and Linux, or be mounted outside the application directory as a container volume.
 
 ## Known limitations
 
@@ -344,7 +365,7 @@ These assumptions were made while building the system. Change them in **Settings
 - **Classifier data quality.** Model accuracy depends entirely on the diversity and correctness of verified labels and synthetic training data. It is not independent laboratory validation.
 - **Single camera, single field of view.** Only what fits in one frame is analysed; there is no stage automation or mosaicking to cover a whole filter at high magnification.
 - **Environmental samples are harder than lab samples.** Real water samples contain far more interfering material than the synthetic demos.
-- **Local, single-user scope.** There is no authentication, no multi-user isolation, and no audit trail beyond the database timestamps. The dashboard must not be exposed to the public internet.
+- **Single-user scope.** The optional login is one shared account, not a multi-user system: there is no per-user isolation, no role separation, and no audit trail beyond the database timestamps. SQLite and the on-disk image files also mean the service must run as a single instance.
 
 ## Future scope
 
