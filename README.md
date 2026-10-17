@@ -131,7 +131,7 @@ The database, generated images, and trained classifier live in the `/data` volum
 2. In Render choose **New → Blueprint**, connect the repository, and apply it. Render reads `render.yaml` and prompts for `ADMIN_PASSWORD`; enter a long random password. `DEVICE_API_KEY` is generated once — copy it from the service's Environment tab into `firmware/esp32-cam/include/secrets.h`.
 3. When the build finishes, open `https://<service-name>.onrender.com` and sign in.
 
-The blueprint deliberately leaves out `ADMIN_USER`, `SESSION_HOURS`, `MAX_UPLOAD_MB`, and `ESP32_IP` so their code defaults keep applying; add them in the service's Environment tab if you need to override one.
+The blueprint deliberately leaves out `ADMIN_USER`, `SESSION_HOURS`, `MAX_UPLOAD_MB`, `MAX_CONCURRENT_ANALYSES`, and `ESP32_IP` so their code defaults keep applying; add them in the service's Environment tab if you need to override one.
 
 Three settings in the blueprint are deliberate:
 
