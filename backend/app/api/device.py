@@ -10,11 +10,12 @@ import cv2
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import Response
+from starlette.concurrency import run_in_threadpool
 
 from ..config import config
 from ..db import get_settings
 from ..schemas import DeviceCaptureRequest, DeviceLedRequest
-from .common import decode_image, persist_analysis, require_sample
+from .common import analysis_slot, decode_image, persist_analysis, require_sample
 from .analyze import _active_mm_per_pixel
 
 router = APIRouter(prefix="/api/device", tags=["ESP32-CAM device"])
@@ -44,6 +45,28 @@ def _camera_defaults() -> dict[str, Any]:
     return {key: value for key, value in params.items() if value not in (None, "")}
 
 
+def _store_device_frame(sample_id: int, content: bytes, content_type: str | None, session: str, complete: bool, volume_ml: float | None) -> dict[str, Any]:
+    frame = decode_image(content, content_type)
+    frame_path = config.raw_dir / f"session-{sample_id}-{session}-{uuid.uuid4().hex}.jpg"
+    if not cv2.imwrite(str(frame_path), frame):
+        raise HTTPException(status_code=500, detail="Could not store uploaded device frame")
+    if not complete:
+        return {"stored": True, "capture_session": session, "analysis": None}
+    # Storing a single frame is cheap and stays outside the slot, so a camera
+    # mid-session is never made to wait out an unrelated analysis. Only the final
+    # frame, which loads the whole session into memory, is queued.
+    with analysis_slot():
+        paths = sorted(config.raw_dir.glob(f"session-{sample_id}-{session}-*.jpg"))
+        frames = [cv2.imread(str(path), cv2.IMREAD_COLOR) for path in paths]
+        frames = [item for item in frames if item is not None]
+        if not frames:
+            raise HTTPException(status_code=400, detail="No decodable frames were available for the completed capture session")
+        analysis = persist_analysis(sample_id, frames, volume_ml, get_settings(), _active_mm_per_pixel())
+    for path in paths:
+        path.unlink(missing_ok=True)
+    return {"stored": True, "capture_session": session, "analysis": analysis}
+
+
 @router.post("/upload", status_code=201)
 async def upload_from_device(
     request: Request,
@@ -67,25 +90,18 @@ async def upload_from_device(
     else:
         content = await request.body()
         image_content_type = content_type
-    frame = decode_image(content, image_content_type)
     session = re.sub(r"[^A-Za-z0-9_-]", "", x_capture_session or uuid.uuid4().hex)[:64]
     if not session:
         raise HTTPException(status_code=422, detail="Invalid capture session identifier")
-    frame_path = config.raw_dir / f"session-{x_sample_id}-{session}-{uuid.uuid4().hex}.jpg"
-    if not cv2.imwrite(str(frame_path), frame):
-        raise HTTPException(status_code=500, detail="Could not store uploaded device frame")
     complete = x_capture_complete.lower() in {"1", "true", "yes", "final"}
-    if not complete:
-        return {"stored": True, "capture_session": session, "analysis": None}
-    paths = sorted(config.raw_dir.glob(f"session-{x_sample_id}-{session}-*.jpg"))
-    frames = [cv2.imread(str(path), cv2.IMREAD_COLOR) for path in paths]
-    frames = [frame for frame in frames if frame is not None]
-    if not frames:
-        raise HTTPException(status_code=400, detail="No decodable frames were available for the completed capture session")
-    analysis = persist_analysis(x_sample_id, frames, sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
-    for path in paths:
-        path.unlink(missing_ok=True)
-    return {"stored": True, "capture_session": session, "sample": sample, "analysis": analysis}
+    # Decoding, frame stacking and the analysis all run off the event loop: a
+    # queued analysis must not freeze health checks for other requests.
+    result = await run_in_threadpool(
+        _store_device_frame, x_sample_id, content, image_content_type, session, complete, sample.get("volume_ml")
+    )
+    if result.get("analysis") is not None:
+        result["sample"] = sample
+    return result
 
 
 @router.post("/capture", status_code=201)
@@ -93,7 +109,7 @@ def pull_capture(payload: DeviceCaptureRequest, x_api_key: str | None = Header(d
     _require_api_key(x_api_key)
     sample = require_sample(payload.sample_id)
     host = _host(payload.esp32_ip)
-    frames = []
+    captures = []
     try:
         with httpx.Client(timeout=8.0) as client:
             defaults = _camera_defaults()
@@ -102,11 +118,15 @@ def pull_capture(payload: DeviceCaptureRequest, x_api_key: str | None = Header(d
             for _ in range(payload.frames):
                 response = client.get(_url(host, "/capture"))
                 response.raise_for_status()
-                frames.append(decode_image(response.content, response.headers.get("content-type")))
+                captures.append((response.content, response.headers.get("content-type")))
     except (httpx.HTTPError, HTTPException) as error:
         detail = error.detail if isinstance(error, HTTPException) else f"Could not capture from ESP32-CAM: {error}"
         raise HTTPException(status_code=502, detail=detail) from error
-    analysis = persist_analysis(payload.sample_id, frames, sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
+    # The camera round-trips stay outside the slot so a slow or offline camera
+    # cannot block an unrelated capture from being analysed.
+    with analysis_slot():
+        frames = [decode_image(content, content_type) for content, content_type in captures]
+        analysis = persist_analysis(payload.sample_id, frames, sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
     return {"sample": sample, "analysis": analysis}
 
 

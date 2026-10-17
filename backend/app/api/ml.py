@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from ..db import database
 from ..ml.model import model_status, train_model
 from ..schemas import ParticleUpdate, TrainRequest
+from .common import analysis_slot
 
 router = APIRouter(prefix="/api", tags=["machine learning"])
 
@@ -20,7 +21,10 @@ def retrain_model(payload: TrainRequest):
         verified = [dict(row) for row in conn.execute("SELECT * FROM particles WHERE user_verified_class IS NOT NULL")]
     if not payload.include_synthetic and len({item["user_verified_class"] for item in verified}) < 2:
         raise HTTPException(status_code=422, detail="At least two verified classes are required when synthetic data is excluded")
-    return train_model(verified if payload.include_verified_particles else [], payload.include_synthetic)
+    # Training builds its own feature matrix, so it competes with analyses for the
+    # same memory budget and takes the same single slot.
+    with analysis_slot():
+        return train_model(verified if payload.include_verified_particles else [], payload.include_synthetic)
 
 
 @router.patch("/particles/{particle_id}")

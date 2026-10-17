@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from datetime import datetime
-from pathlib import Path
+from typing import Any
 
 import cv2
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..config import config
 from ..db import active_calibration, database, get_settings
 from ..schemas import DemoRequest
-from .common import asset_path, create_sample, decode_image, get_analysis, persist_analysis, require_sample
+from .common import analysis_slot, asset_path, create_sample, decode_image, get_analysis, persist_analysis, require_sample
 
 router = APIRouter(prefix="/api", tags=["analysis"])
 
@@ -18,6 +19,34 @@ router = APIRouter(prefix="/api", tags=["analysis"])
 def _active_mm_per_pixel() -> float | None:
     calibration = active_calibration()
     return float(calibration["mm_per_pixel"]) if calibration else None
+
+
+def _analyse_payloads(
+    payloads: list[tuple[bytes, str | None]],
+    sample_id: int | None,
+    volume_ml: float | None,
+    name: str | None,
+    location: str | None,
+    filter_pore_um: float | None,
+    notes: str | None,
+) -> dict[str, Any]:
+    # Runs in a worker thread: the event loop stays free for health checks while a
+    # large capture is being decoded and analysed.
+    with analysis_slot():
+        frames = [decode_image(content, content_type) for content, content_type in payloads]
+        if sample_id is None:
+            sample = create_sample({
+                "name": (name or f"Analysis {datetime.now().strftime('%Y-%m-%d %H:%M')}").strip(),
+                "location": location, "volume_ml": volume_ml, "filter_pore_um": filter_pore_um, "notes": notes,
+            })
+            sample_id = sample["id"]
+        else:
+            sample = require_sample(sample_id)
+        if volume_ml is not None and volume_ml <= 0:
+            raise HTTPException(status_code=422, detail="volume_ml must be positive")
+        effective_volume = volume_ml if volume_ml is not None else sample.get("volume_ml")
+        analysis = persist_analysis(sample_id, frames, effective_volume, get_settings(), _active_mm_per_pixel())
+    return {"sample": require_sample(sample_id), "analysis": analysis}
 
 
 @router.post("/analyze", status_code=201)
@@ -34,26 +63,17 @@ async def analyze_upload(
         raise HTTPException(status_code=422, detail="At least one image is required")
     if len(images) > 10:
         raise HTTPException(status_code=422, detail="At most 10 images may be analysed together")
-    frames = []
+    payloads = []
     total_bytes = 0
     for upload in images:
         content = await upload.read()
         total_bytes += len(content)
         if total_bytes > config.max_upload_mb * 1024 * 1024:
             raise HTTPException(status_code=413, detail=f"Upload exceeds {config.max_upload_mb} MB total limit")
-        frames.append(decode_image(content, upload.content_type))
-    if sample_id is None:
-        sample = create_sample({
-            "name": (name or f"Analysis {datetime.now().strftime('%Y-%m-%d %H:%M')}").strip(),
-            "location": location, "volume_ml": volume_ml, "filter_pore_um": filter_pore_um, "notes": notes,
-        })
-        sample_id = sample["id"]
-    else:
-        sample = require_sample(sample_id)
-    if volume_ml is not None and volume_ml <= 0:
-        raise HTTPException(status_code=422, detail="volume_ml must be positive")
-    analysis = persist_analysis(sample_id, frames, volume_ml if volume_ml is not None else sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
-    return {"sample": require_sample(sample_id), "analysis": analysis}
+        payloads.append((content, upload.content_type))
+    return await run_in_threadpool(
+        _analyse_payloads, payloads, sample_id, volume_ml, name, location, filter_pore_um, notes
+    )
 
 
 @router.post("/samples/{sample_id}/reanalyze")
@@ -63,10 +83,11 @@ def reanalyze_sample(sample_id: int):
         latest = conn.execute("SELECT original_path FROM analyses WHERE sample_id = ? ORDER BY id DESC LIMIT 1", (sample_id,)).fetchone()
     if latest is None:
         raise HTTPException(status_code=409, detail="Sample has no prior image to re-analyse")
-    image = cv2.imread(str(asset_path(latest["original_path"])), cv2.IMREAD_COLOR)
-    if image is None:
-        raise HTTPException(status_code=410, detail="The stored image file is unavailable")
-    analysis = persist_analysis(sample_id, [image], sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
+    with analysis_slot():
+        image = cv2.imread(str(asset_path(latest["original_path"])), cv2.IMREAD_COLOR)
+        if image is None:
+            raise HTTPException(status_code=410, detail="The stored image file is unavailable")
+        analysis = persist_analysis(sample_id, [image], sample.get("volume_ml"), get_settings(), _active_mm_per_pixel())
     return {"sample": sample, "analysis": analysis}
 
 
@@ -86,19 +107,20 @@ def generate_demo(payload: DemoRequest):
     from scripts.generate_synthetic import SYNTHETIC_MM_PER_PIXEL, generate_image
 
     values = payload.model_dump()
-    sample = create_sample({
-        "name": values["name"], "location": values["location"], "volume_ml": values["volume_ml"],
-        "filter_pore_um": values["filter_pore_um"], "notes": values["notes"],
-    })
-    image, ground_truth = generate_image({
-        "n_particles": values["n_particles"], "fibre_ratio": values["fibre_ratio"], "noise": values["noise"],
-        "lighting_gradient": values["lighting_gradient"],
-    })
-    # The synthetic scale is passed straight to the analysis so the demo reports
-    # millimetres. It is deliberately NOT written to the calibrations table: a
-    # fabricated scale would otherwise become the active calibration and silently
-    # size real samples that were never calibrated.
-    analysis = persist_analysis(sample["id"], [image], sample.get("volume_ml"), get_settings(), SYNTHETIC_MM_PER_PIXEL)
+    with analysis_slot():
+        sample = create_sample({
+            "name": values["name"], "location": values["location"], "volume_ml": values["volume_ml"],
+            "filter_pore_um": values["filter_pore_um"], "notes": values["notes"],
+        })
+        image, ground_truth = generate_image({
+            "n_particles": values["n_particles"], "fibre_ratio": values["fibre_ratio"], "noise": values["noise"],
+            "lighting_gradient": values["lighting_gradient"],
+        })
+        # The synthetic scale is passed straight to the analysis so the demo reports
+        # millimetres. It is deliberately NOT written to the calibrations table: a
+        # fabricated scale would otherwise become the active calibration and silently
+        # size real samples that were never calibrated.
+        analysis = persist_analysis(sample["id"], [image], sample.get("volume_ml"), get_settings(), SYNTHETIC_MM_PER_PIXEL)
     analysis["ground_truth_count"] = len(ground_truth)
     analysis["synthetic_mm_per_pixel"] = SYNTHETIC_MM_PER_PIXEL
     return {"sample": sample, "analysis": analysis}

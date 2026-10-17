@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import cv2
 import numpy as np
@@ -12,6 +14,21 @@ from fastapi import HTTPException
 from ..config import config
 from ..db import database, utc_now
 from ..processing.pipeline import analyze_frames
+
+# A single maximum-size analysis already uses most of a 512 MB container, so
+# extra runs are queued rather than allowed to push the instance into an OOM kill.
+ANALYSIS_SLOTS = threading.BoundedSemaphore(config.max_concurrent_analyses)
+SLOT_WAIT_SECONDS = 90.0
+
+
+@contextmanager
+def analysis_slot() -> Iterator[None]:
+    if not ANALYSIS_SLOTS.acquire(timeout=SLOT_WAIT_SECONDS):
+        raise HTTPException(status_code=503, detail="Another capture is still being analysed; please retry in a moment")
+    try:
+        yield
+    finally:
+        ANALYSIS_SLOTS.release()
 
 
 def row_dict(row: Any | None) -> dict[str, Any] | None:

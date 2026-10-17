@@ -101,6 +101,7 @@ Important `.env` values:
 - `DEVICE_API_KEY`: shared credential for device-control and device-upload requests.
 - `ESP32_IP`: camera hostname or IP address, optionally with a port; do not include `http://`.
 - `MAX_UPLOAD_MB`: maximum accepted upload size.
+- `MAX_CONCURRENT_ANALYSES`: how many analyses may run at once, default 1. Extra requests wait for a free slot and return `503` if none opens within 90 seconds. Raise it only on hosts with memory to spare.
 - `DATA_DIR`: local storage root, defaulting to `data`.
 - `ADMIN_USER` / `ADMIN_PASSWORD`: dashboard login. Leave the password empty for local use without a login; set it before publishing.
 - `SESSION_HOURS`: how long a sign-in session stays valid, default 12.
@@ -132,10 +133,11 @@ The database, generated images, and trained classifier live in the `/data` volum
 
 The blueprint deliberately leaves out `ADMIN_USER`, `SESSION_HOURS`, `MAX_UPLOAD_MB`, and `ESP32_IP` so their code defaults keep applying; add them in the service's Environment tab if you need to override one.
 
-Two settings in the blueprint are deliberate:
+Three settings in the blueprint are deliberate:
 
 - **A persistent disk requires a paid instance**, so `plan` is `starter`, the cheapest tier that can mount `/data`. On the free plan the disk cannot be attached at all, and every deploy or restart discards the database, the uploaded images, and any retrained classifier.
 - **`numInstances` must stay at 1.** The SQLite database and image files are local to the instance, so a second replica would keep its own separate data.
+- **Analyses are queued, not run in parallel**, because a starter instance has 512 MB of memory. Measured at exactly 0.5 CPU and 512 MB, two and three simultaneous maximum-size uploads — ten 1600×1200 frames each — completed with no OOM kill, peaking at 399–449 MiB of process memory, while `/api/health` answered every probe in under 300 ms. Under three-way load the 90 s queue wait is occasionally exceeded and a request is shed with `503`. Offloading the work off the event loop matters as much as the queue: without it, the same two-way load blocked `/api/health` for 30 s at a time, which is enough for a platform health check to fail and restart the instance. The image also caps malloc arenas and BLAS threads, worth a further ~35 MiB at peak. Raise `MAX_CONCURRENT_ANALYSES` only on a larger plan.
 
 ### Railway and Fly.io
 
@@ -367,6 +369,7 @@ These assumptions were made while building the system. Change them in **Settings
 - **Environmental samples are harder than lab samples.** Real water samples contain far more interfering material than the synthetic demos.
 - **Single-user scope.** The optional login is one shared account, not a multi-user system: there is no per-user isolation, no role separation, and no audit trail beyond the database timestamps. SQLite and the on-disk image files also mean the service must run as a single instance.
 - **Live camera control needs network reach.** The Device page's preview, LED, capture, and camera-settings calls are made *by the backend* to `http://<camera>/…`. A publicly hosted backend cannot route to a private LAN address such as `192.168.1.50`, so those controls report the camera as offline. This is a network constraint, not a software fault. The reverse direction is unaffected: the camera pushes captures to the public HTTPS URL and they are analysed normally. To drive a LAN camera remotely you would need to expose it through a tunnel, which also requires allowing an `https://` camera address in `device.py`.
+- **Analyses are serialised by default.** A second capture waits for the first to finish instead of running alongside it, so if several cameras upload at once the last one can wait tens of seconds — longer than the firmware's 20 s HTTP timeout — and a request that gets no slot within 90 seconds is shed with `503`. The backend keeps working after a camera disconnects, so a timed-out upload is still analysed and stored; the firmware's retry can therefore leave two analyses for one sample, and the dashboard shows the latest. Raise `MAX_CONCURRENT_ANALYSES` once the host has memory to spare.
 
 ## Future scope
 

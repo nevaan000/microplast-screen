@@ -17,6 +17,7 @@ class AppConfig:
     device_api_key: str = os.getenv("DEVICE_API_KEY", "change-this-local-device-key")
     esp32_ip: str = os.getenv("ESP32_IP", "")
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
+    max_concurrent_analyses: int = max(1, int(os.getenv("MAX_CONCURRENT_ANALYSES", "1")))
     admin_user: str = os.getenv("ADMIN_USER", "admin")
     admin_password: str = os.getenv("ADMIN_PASSWORD", "")
     session_hours: int = int(os.getenv("SESSION_HOURS", "12"))

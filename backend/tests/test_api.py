@@ -1,9 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
 import pytest
 from fastapi.testclient import TestClient
 
+from backend.app.api import common
 from backend.app.config import config
 from backend.app.main import app
 from scripts.generate_synthetic import SYNTHETIC_MM_PER_PIXEL, generate_image
@@ -94,3 +96,29 @@ def test_asset_paths_survive_a_data_directory_outside_the_app_root(clean_data):
         assert client.post(f"/api/samples/{sample_id}/reanalyze").status_code == 200
         assert client.delete(f"/api/samples/{sample_id}").status_code == 204
         assert not annotated.exists()
+
+
+def test_a_saturated_analysis_slot_returns_503_and_leaves_the_api_responsive(clean_data, monkeypatch):
+    """A second concurrent maximum-size analysis is what OOM-kills a 512 MB instance."""
+    monkeypatch.setattr(common, "SLOT_WAIT_SECONDS", 0.05)
+    assert common.ANALYSIS_SLOTS.acquire(timeout=5)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/demo/generate", json={"name": "Queued", "n_particles": 8, "noise": 0})
+            assert response.status_code == 503
+            assert "retry" in response.json()["detail"].lower()
+            assert client.get("/api/health").status_code == 200
+    finally:
+        common.ANALYSIS_SLOTS.release()
+
+
+def test_concurrent_analyses_are_queued_and_release_their_slot(clean_data):
+    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(client.post, "/api/demo/generate", json={"name": f"Concurrent {index}", "n_particles": 10, "noise": 0})
+            for index in range(2)
+        ]
+        statuses = [future.result(timeout=180).status_code for future in futures]
+    assert statuses == [201, 201]
+    assert common.ANALYSIS_SLOTS.acquire(timeout=5), "analysis slot was not released"
+    common.ANALYSIS_SLOTS.release()
