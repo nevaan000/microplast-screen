@@ -366,6 +366,7 @@ These assumptions were made while building the system. Change them in **Settings
 - **Single camera, single field of view.** Only what fits in one frame is analysed; there is no stage automation or mosaicking to cover a whole filter at high magnification.
 - **Environmental samples are harder than lab samples.** Real water samples contain far more interfering material than the synthetic demos.
 - **Single-user scope.** The optional login is one shared account, not a multi-user system: there is no per-user isolation, no role separation, and no audit trail beyond the database timestamps. SQLite and the on-disk image files also mean the service must run as a single instance.
+- **Live camera control needs network reach.** The Device page's preview, LED, capture, and camera-settings calls are made *by the backend* to `http://<camera>/…`. A publicly hosted backend cannot route to a private LAN address such as `192.168.1.50`, so those controls report the camera as offline. This is a network constraint, not a software fault. The reverse direction is unaffected: the camera pushes captures to the public HTTPS URL and they are analysed normally. To drive a LAN camera remotely you would need to expose it through a tunnel, which also requires allowing an `https://` camera address in `device.py`.
 
 ## Future scope
 
