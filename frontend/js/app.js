@@ -64,6 +64,9 @@ function renderLogin() {
     const button = event.target.querySelector('button[type=submit]');
     error.hidden = true;
     button.disabled = true;
+    // A serverless cold start can take tens of seconds before the first byte
+    // arrives, so the button has to say the attempt is still in flight.
+    button.textContent = 'Signing in…';
     try {
       await api.login(document.querySelector('#login-user').value.trim(), document.querySelector('#login-pass').value);
       authState = await api.me();
@@ -74,6 +77,7 @@ function renderLogin() {
       error.textContent = loginError.message;
       error.hidden = false;
       button.disabled = false;
+      button.textContent = 'Sign in';
     }
   };
 }
