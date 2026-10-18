@@ -19,3 +19,12 @@ data/models/*
 .pio/
 .pytest_cache/
 firmware/esp32-cam/include/secrets.h
+
+.vercel
+.env*
+
+# Written by `vercel integration add neon`; not part of the application, and the
+# symlinks under .claude break Vercel's bundle size calculation.
+.agents/
+.claude/
+skills-lock.json
